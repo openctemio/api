@@ -1370,13 +1370,13 @@ func TestBulkUpdateAssetGroups(t *testing.T) {
 			Environment: &newEnv,
 		}
 
-		updated, err := svc.BulkUpdateAssetGroups(context.Background(), tenantID.String(), input)
-		if err != nil {
-			t.Fatalf("BulkUpdateAssetGroups failed: %v", err)
-		}
+		res := svc.BulkUpdateAssetGroups(context.Background(), tenantID.String(), input)
 		// 2 succeed, 1 fails (not found)
-		if updated != 2 {
-			t.Errorf("expected 2 updated, got %d", updated)
+		if res.Succeeded != 2 {
+			t.Errorf("expected 2 updated, got %d", res.Succeeded)
+		}
+		if res.Failed != 1 || len(res.Errors) != 1 {
+			t.Errorf("expected 1 failure with 1 error, got failed=%d errors=%d", res.Failed, len(res.Errors))
 		}
 	})
 
@@ -1391,12 +1391,12 @@ func TestBulkUpdateAssetGroups(t *testing.T) {
 			Criticality: &newCrit,
 		}
 
-		updated, err := svc.BulkUpdateAssetGroups(context.Background(), tenantID.String(), input)
-		if err != nil {
-			t.Fatalf("BulkUpdateAssetGroups failed: %v", err)
+		res := svc.BulkUpdateAssetGroups(context.Background(), tenantID.String(), input)
+		if res.Succeeded != 0 {
+			t.Errorf("expected 0 updated for all invalid IDs, got %d", res.Succeeded)
 		}
-		if updated != 0 {
-			t.Errorf("expected 0 updated for all invalid IDs, got %d", updated)
+		if res.Failed != 2 {
+			t.Errorf("expected 2 failures for invalid IDs, got %d", res.Failed)
 		}
 	})
 }
@@ -1417,13 +1417,13 @@ func TestBulkDeleteAssetGroups(t *testing.T) {
 
 		groupIDs := []string{g1.ID().String(), g2.ID().String(), nonExistentID.String()}
 
-		deleted, err := svc.BulkDeleteAssetGroups(context.Background(), tenantID.String(), groupIDs)
-		if err != nil {
-			t.Fatalf("BulkDeleteAssetGroups failed: %v", err)
-		}
+		res := svc.BulkDeleteAssetGroups(context.Background(), tenantID.String(), groupIDs)
 		// 2 succeed, 1 fails (not found)
-		if deleted != 2 {
-			t.Errorf("expected 2 deleted, got %d", deleted)
+		if res.Succeeded != 2 {
+			t.Errorf("expected 2 deleted, got %d", res.Succeeded)
+		}
+		if res.Failed != 1 {
+			t.Errorf("expected 1 failure, got %d", res.Failed)
 		}
 
 		// Verify groups were removed from repo
@@ -1436,12 +1436,12 @@ func TestBulkDeleteAssetGroups(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
 
-		deleted, err := svc.BulkDeleteAssetGroups(context.Background(), shared.NewID().String(), []string{"bad-id", "worse-id"})
-		if err != nil {
-			t.Fatalf("BulkDeleteAssetGroups failed: %v", err)
+		res := svc.BulkDeleteAssetGroups(context.Background(), shared.NewID().String(), []string{"bad-id", "worse-id"})
+		if res.Succeeded != 0 {
+			t.Errorf("expected 0 deleted for all invalid IDs, got %d", res.Succeeded)
 		}
-		if deleted != 0 {
-			t.Errorf("expected 0 deleted for all invalid IDs, got %d", deleted)
+		if res.Failed != 2 {
+			t.Errorf("expected 2 failures for invalid IDs, got %d", res.Failed)
 		}
 	})
 }

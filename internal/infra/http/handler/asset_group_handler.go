@@ -723,16 +723,14 @@ func (h *AssetGroupHandler) BulkUpdate(w http.ResponseWriter, r *http.Request) {
 		Criticality: req.Update.Criticality,
 	}
 
-	updated, err := h.service.BulkUpdateAssetGroups(r.Context(), middleware.MustGetTenantID(r.Context()), input)
-	if err != nil {
-		h.handleServiceError(w, err)
-		return
-	}
+	res := h.service.BulkUpdateAssetGroups(r.Context(), middleware.MustGetTenantID(r.Context()), input)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"updated": updated,
+		"updated": res.Succeeded,
+		"failed":  res.Failed,
+		"errors":  res.Errors,
 		"total":   len(req.GroupIDs),
 	})
 }
@@ -761,16 +759,14 @@ func (h *AssetGroupHandler) BulkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deleted, err := h.service.BulkDeleteAssetGroups(r.Context(), middleware.MustGetTenantID(r.Context()), req.GroupIDs)
-	if err != nil {
-		h.handleServiceError(w, err)
-		return
-	}
+	res := h.service.BulkDeleteAssetGroups(r.Context(), middleware.MustGetTenantID(r.Context()), req.GroupIDs)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"deleted": deleted,
+		"deleted": res.Succeeded,
+		"failed":  res.Failed,
+		"errors":  res.Errors,
 		"total":   len(req.GroupIDs),
 	})
 }

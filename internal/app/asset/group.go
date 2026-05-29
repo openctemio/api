@@ -460,11 +460,12 @@ type BulkUpdateInput struct {
 }
 
 // BulkUpdateAssetGroups updates multiple asset groups.
-func (s *AssetGroupService) BulkUpdateAssetGroups(ctx context.Context, tenantID string, input BulkUpdateInput) (int, error) {
-	updated := 0
+func (s *AssetGroupService) BulkUpdateAssetGroups(ctx context.Context, tenantID string, input BulkUpdateInput) *BulkGroupResult {
+	res := &BulkGroupResult{}
 	for _, idStr := range input.GroupIDs {
 		id, err := shared.IDFromString(idStr)
 		if err != nil {
+			res.fail(idStr, "invalid group ID")
 			continue
 		}
 
@@ -474,27 +475,45 @@ func (s *AssetGroupService) BulkUpdateAssetGroups(ctx context.Context, tenantID 
 		})
 		if err != nil {
 			s.logger.Warn("bulk update failed for group", "id", idStr, "error", err)
+			res.fail(idStr, err.Error())
 			continue
 		}
-		updated++
+		res.Succeeded++
 	}
-	return updated, nil
+	return res
 }
 
 // BulkDeleteAssetGroups deletes multiple asset groups.
-func (s *AssetGroupService) BulkDeleteAssetGroups(ctx context.Context, tenantIDStr string, groupIDs []string) (int, error) {
-	deleted := 0
+func (s *AssetGroupService) BulkDeleteAssetGroups(ctx context.Context, tenantIDStr string, groupIDs []string) *BulkGroupResult {
+	res := &BulkGroupResult{}
 	for _, idStr := range groupIDs {
 		id, err := shared.IDFromString(idStr)
 		if err != nil {
+			res.fail(idStr, "invalid group ID")
 			continue
 		}
 
 		if err := s.DeleteAssetGroup(ctx, tenantIDStr, id); err != nil {
 			s.logger.Warn("bulk delete failed for group", "id", idStr, "error", err)
+			res.fail(idStr, err.Error())
 			continue
 		}
-		deleted++
+		res.Succeeded++
 	}
-	return deleted, nil
+	return res
+}
+
+// BulkGroupResult reports the outcome of a best-effort bulk asset-group
+// operation: how many items succeeded/failed and a per-item error for each
+// failure, so callers can tell which IDs failed and why (rather than only a
+// success count).
+type BulkGroupResult struct {
+	Succeeded int      `json:"succeeded"`
+	Failed    int      `json:"failed"`
+	Errors    []string `json:"errors,omitempty"`
+}
+
+func (r *BulkGroupResult) fail(id, msg string) {
+	r.Failed++
+	r.Errors = append(r.Errors, fmt.Sprintf("%s: %s", id, msg))
 }
