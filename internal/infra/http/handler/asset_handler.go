@@ -347,13 +347,14 @@ type CreateAssetRequest struct {
 
 // UpdateAssetRequest represents the request to update an asset.
 type UpdateAssetRequest struct {
-	Name        *string  `json:"name" validate:"omitempty,min=1,max=255"`
-	Criticality *string  `json:"criticality" validate:"omitempty,criticality"`
-	Scope       *string  `json:"scope" validate:"omitempty,scope"`
-	Exposure    *string  `json:"exposure" validate:"omitempty,exposure"`
-	Description *string  `json:"description" validate:"omitempty,max=1000"`
-	OwnerRef    *string  `json:"owner_ref" validate:"omitempty,max=500"`
-	Tags        []string `json:"tags" validate:"omitempty,max=20,dive,max=50"`
+	Name        *string        `json:"name" validate:"omitempty,min=1,max=255"`
+	Criticality *string        `json:"criticality" validate:"omitempty,criticality"`
+	Scope       *string        `json:"scope" validate:"omitempty,scope"`
+	Exposure    *string        `json:"exposure" validate:"omitempty,exposure"`
+	Description *string        `json:"description" validate:"omitempty,max=1000"`
+	OwnerRef    *string        `json:"owner_ref" validate:"omitempty,max=500"`
+	Tags        []string       `json:"tags" validate:"omitempty,max=20,dive,max=50"`
+	Properties  map[string]any `json:"properties,omitempty"`
 }
 
 // toAssetResponse converts a domain asset to API response.
@@ -773,6 +774,7 @@ func (h *AssetHandler) Update(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		OwnerRef:    req.OwnerRef,
 		Tags:        req.Tags,
+		Properties:  req.Properties,
 	}
 
 	a, err := h.service.UpdateAsset(r.Context(), id, tenantID, input)

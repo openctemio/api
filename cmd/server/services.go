@@ -306,6 +306,7 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 	// endpoint can write lifecycle_paused_until without going
 	// through the full load-modify-save path.
 	s.Asset.SetLifecycleRepository(repos.Asset)
+	s.Asset.SetStateHistoryRepository(repos.AssetStateHistory)
 
 	s.AssetGroup = app.NewAssetGroupService(repos.AssetGroup, log)
 	s.AssetType = app.NewAssetTypeService(repos.AssetType, repos.AssetTypeCat, log)

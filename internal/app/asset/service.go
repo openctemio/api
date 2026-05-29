@@ -70,6 +70,12 @@ type AssetService struct {
 	// error. Separated from the main Repository to avoid forcing
 	// every mock in tests to add a snooze method they never use.
 	lifecycleRepo assetdom.LifecycleRepository
+
+	// State-history repository for the asset audit trail (appeared / status
+	// changes). Optional and best-effort — when nil, recording is skipped and
+	// failures never abort the originating operation. Kept off the main
+	// Repository so test mocks don't need to implement it.
+	stateHistoryRepo assetdom.StateHistoryRepository
 }
 
 // UserMatcher resolves external references (email, username) to user IDs.
@@ -128,6 +134,23 @@ func (s *AssetService) SetScopeRuleEvaluator(fn scope.RuleEvaluatorFunc) {
 // this nil; the service returns a clear error in that case.
 func (s *AssetService) SetLifecycleRepository(r assetdom.LifecycleRepository) {
 	s.lifecycleRepo = r
+}
+
+// SetStateHistoryRepository wires the append-only asset state-history writer.
+// Optional — when nil, state changes are simply not recorded.
+func (s *AssetService) SetStateHistoryRepository(r assetdom.StateHistoryRepository) {
+	s.stateHistoryRepo = r
+}
+
+// recordStateChange persists an asset state-change record on a best-effort
+// basis: a nil repo or a write error never aborts the originating operation.
+func (s *AssetService) recordStateChange(ctx context.Context, change *assetdom.AssetStateChange) {
+	if s.stateHistoryRepo == nil || change == nil {
+		return
+	}
+	if err := s.stateHistoryRepo.Create(ctx, change); err != nil {
+		s.logger.Warn("failed to record asset state change", "error", err)
+	}
 }
 
 // SnoozeLifecycle pauses the lifecycle worker on a single asset for
@@ -358,6 +381,10 @@ func (s *AssetService) CreateAsset(ctx context.Context, input CreateAssetInput) 
 	if err := s.repo.Create(ctx, a); err != nil {
 		return nil, fmt.Errorf("failed to create asset: %w", err)
 	}
+
+	// Record an "appeared" event for the state-history audit trail (powers
+	// shadow-IT detection, appearances, and the activity timeline).
+	s.recordStateChange(ctx, assetdom.RecordAssetAppeared(tenantID, a.ID(), assetdom.ChangeSourceManual, "asset created"))
 
 	// Evaluate scope rules for new asset (async — don't block response)
 	if s.scopeRuleEvaluator != nil && len(a.Tags()) > 0 {
@@ -871,6 +898,9 @@ type UpdateAssetInput struct {
 	Description *string  `validate:"omitempty,max=1000"`
 	OwnerRef    *string  `validate:"omitempty,max=500"` // Free-text owner reference
 	Tags        []string `validate:"omitempty,max=20,dive,max=50"`
+	// Properties patches per-type metadata. Merged (not replaced) into the
+	// asset's existing properties so keys like is_crown_jewel are preserved.
+	Properties map[string]any
 }
 
 // UpdateAsset updates an existing asset.
@@ -948,6 +978,19 @@ func (s *AssetService) UpdateAsset(ctx context.Context, assetID string, tenantID
 		for _, tag := range input.Tags {
 			a.AddTag(tag)
 		}
+	}
+
+	// Patch per-type metadata. Merge into existing properties (don't replace)
+	// so keys written elsewhere — e.g. is_crown_jewel — are not wiped.
+	if input.Properties != nil {
+		merged := a.Properties()
+		if merged == nil {
+			merged = make(map[string]any, len(input.Properties))
+		}
+		for k, v := range input.Properties {
+			merged[k] = v
+		}
+		a.SetProperties(merged)
 	}
 
 	// Recalculate risk score after updates using tenant-specific config
@@ -1261,12 +1304,14 @@ func (s *AssetService) ActivateAsset(ctx context.Context, tenantID, assetID stri
 		return nil, err
 	}
 
+	oldStatus := a.Status().String()
 	a.Activate()
 
 	if err := s.repo.Update(ctx, a); err != nil {
 		return nil, fmt.Errorf("failed to activate asset: %w", err)
 	}
 
+	s.recordStateChange(ctx, assetdom.RecordFieldChange(parsedTenantID, parsedID, assetdom.StateChangeStatusChanged, "status", oldStatus, a.Status().String(), assetdom.ChangeSourceManual, nil))
 	s.logger.Info("asset activated", "id", assetID)
 	return a, nil
 }
@@ -1289,12 +1334,14 @@ func (s *AssetService) DeactivateAsset(ctx context.Context, tenantID, assetID st
 		return nil, err
 	}
 
+	oldStatus := a.Status().String()
 	a.Deactivate()
 
 	if err := s.repo.Update(ctx, a); err != nil {
 		return nil, fmt.Errorf("failed to deactivate asset: %w", err)
 	}
 
+	s.recordStateChange(ctx, assetdom.RecordFieldChange(parsedTenantID, parsedID, assetdom.StateChangeStatusChanged, "status", oldStatus, a.Status().String(), assetdom.ChangeSourceManual, nil))
 	s.logger.Info("asset deactivated", "id", assetID)
 	return a, nil
 }
@@ -1317,12 +1364,14 @@ func (s *AssetService) ArchiveAsset(ctx context.Context, tenantID, assetID strin
 		return nil, err
 	}
 
+	oldStatus := a.Status().String()
 	a.Archive()
 
 	if err := s.repo.Update(ctx, a); err != nil {
 		return nil, fmt.Errorf("failed to archive asset: %w", err)
 	}
 
+	s.recordStateChange(ctx, assetdom.RecordFieldChange(parsedTenantID, parsedID, assetdom.StateChangeStatusChanged, "status", oldStatus, a.Status().String(), assetdom.ChangeSourceManual, nil))
 	s.logger.Info("asset archived", "id", assetID)
 	return a, nil
 }
