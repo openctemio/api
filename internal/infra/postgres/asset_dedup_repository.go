@@ -74,6 +74,42 @@ func (r *AssetDedupRepository) ListPendingReviews(ctx context.Context, tenantID 
 	return reviews, nil
 }
 
+// UpsertReview enqueues (or refreshes) a pending duplicate-asset review. It is
+// idempotent: the partial unique index uq_asset_dedup_review_pending ensures at
+// most one pending review per (tenant, keep asset), so repeated scans update the
+// existing pending row instead of creating duplicates.
+func (r *AssetDedupRepository) UpsertReview(
+	ctx context.Context,
+	tenantID, normalizedName, assetType, keepID, keepName string, keepFindingCount int,
+	mergeIDs, mergeNames []string, mergeFindingCount int,
+) error {
+	if len(mergeIDs) == 0 {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO asset_dedup_review (
+			tenant_id, normalized_name, asset_type,
+			keep_asset_id, keep_asset_name, keep_finding_count,
+			merge_asset_ids, merge_asset_names, merge_finding_count, status
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
+		ON CONFLICT (tenant_id, keep_asset_id) WHERE status = 'pending'
+		DO UPDATE SET
+			normalized_name = EXCLUDED.normalized_name,
+			asset_type = EXCLUDED.asset_type,
+			keep_asset_name = EXCLUDED.keep_asset_name,
+			keep_finding_count = EXCLUDED.keep_finding_count,
+			merge_asset_ids = EXCLUDED.merge_asset_ids,
+			merge_asset_names = EXCLUDED.merge_asset_names,
+			merge_finding_count = EXCLUDED.merge_finding_count,
+			created_at = NOW()
+	`, tenantID, normalizedName, assetType, keepID, keepName, keepFindingCount,
+		pq.Array(mergeIDs), pq.Array(mergeNames), mergeFindingCount)
+	if err != nil {
+		return fmt.Errorf("upsert dedup review: %w", err)
+	}
+	return nil
+}
+
 // ApproveAndMerge executes a merge: moves findings/services/relationships from
 // merge assets into the keep asset, then deletes merge assets.
 // tenantID is verified against the review to prevent cross-tenant access.

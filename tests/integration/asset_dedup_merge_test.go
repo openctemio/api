@@ -121,3 +121,57 @@ func TestApproveAndMerge_ConflictSafe(t *testing.T) {
 	_, _ = db.Exec(`DELETE FROM asset_dedup_review WHERE id=$1`, reviewID.String())
 	_, _ = db.Exec(`DELETE FROM tenants WHERE id=$1`, tenant.String())
 }
+
+// TestUpsertReview_Idempotent verifies the enqueue path: repeated UpsertReview
+// calls for the same (tenant, keep) update the single pending row instead of
+// piling up duplicates, and the row is listable + approvable end-to-end.
+func TestUpsertReview_Idempotent(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tenant := createTestTenant(t, db, "dedupenqueue")
+	keep := createTestAsset(t, db, tenant, "keep")
+	merge1 := createTestAsset(t, db, tenant, "merge1")
+	merge2 := createTestAsset(t, db, tenant, "merge2")
+
+	repo := postgres.NewAssetDedupRepository(&postgres.DB{DB: db})
+
+	// First enqueue: keep + merge1
+	if err := repo.UpsertReview(ctx, tenant.String(), "keep", "host", keep.String(), "keep", 0,
+		[]string{merge1.String()}, []string{"merge1"}, 0); err != nil {
+		t.Fatalf("first UpsertReview: %v", err)
+	}
+	// Second enqueue (same keep): merge1 + merge2 → must UPDATE the existing pending row
+	if err := repo.UpsertReview(ctx, tenant.String(), "keep", "host", keep.String(), "keep", 0,
+		[]string{merge1.String(), merge2.String()}, []string{"merge1", "merge2"}, 0); err != nil {
+		t.Fatalf("second UpsertReview: %v", err)
+	}
+
+	pending, err := repo.ListPendingReviews(ctx, tenant.String())
+	if err != nil {
+		t.Fatalf("ListPendingReviews: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected exactly 1 pending review (idempotent), got %d", len(pending))
+	}
+	if len(pending[0].MergeAssetIDs) != 2 {
+		t.Errorf("expected refreshed review to have 2 merge targets, got %d", len(pending[0].MergeAssetIDs))
+	}
+
+	// Approve it → merge succeeds (exercises the full enqueue→approve loop)
+	if err := repo.ApproveAndMerge(ctx, tenant.String(), pending[0].ID, shared.NewID().String()); err != nil {
+		t.Fatalf("ApproveAndMerge after enqueue: %v", err)
+	}
+	var remaining int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM assets WHERE id = ANY($1)`,
+		pq.Array([]string{merge1.String(), merge2.String()})).Scan(&remaining)
+	if remaining != 0 {
+		t.Errorf("merge assets should be deleted after approve, got %d", remaining)
+	}
+
+	// cleanup
+	_, _ = db.Exec(`DELETE FROM assets WHERE id=$1`, keep.String())
+	_, _ = db.Exec(`DELETE FROM asset_dedup_review WHERE tenant_id=$1`, tenant.String())
+	_, _ = db.Exec(`DELETE FROM tenants WHERE id=$1`, tenant.String())
+}
