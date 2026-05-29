@@ -326,7 +326,7 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 
 	// Initialize component & branch services
 	s.Component = app.NewComponentService(repos.Component, log)
-	s.SBOMImport = app.NewSBOMImportService(repos.Component, log)
+	s.SBOMImport = app.NewSBOMImportService(repos.Component, repos.Asset, log)
 	s.ReportSchedule = app.NewReportScheduleService(repos.ReportSchedule, log)
 	s.Branch = app.NewBranchService(repos.Branch, log)
 

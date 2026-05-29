@@ -501,7 +501,7 @@ func (h *AssetGroupHandler) GetAssets(w http.ResponseWriter, r *http.Request) {
 	page := parseQueryInt(query.Get("page"), 1)
 	perPage := parseQueryInt(query.Get("per_page"), 20)
 
-	result, err := h.service.GetGroupAssets(r.Context(), id, page, perPage)
+	result, err := h.service.GetGroupAssets(r.Context(), middleware.MustGetTenantID(r.Context()), id, page, perPage)
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -562,7 +562,7 @@ func (h *AssetGroupHandler) GetFindings(w http.ResponseWriter, r *http.Request) 
 	page := parseQueryInt(query.Get("page"), 1)
 	perPage := parseQueryInt(query.Get("per_page"), 20)
 
-	result, err := h.service.GetGroupFindings(r.Context(), id, page, perPage)
+	result, err := h.service.GetGroupFindings(r.Context(), middleware.MustGetTenantID(r.Context()), id, page, perPage)
 	if err != nil {
 		h.handleServiceError(w, err)
 		return
@@ -626,7 +626,7 @@ func (h *AssetGroupHandler) AddAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.service.AddAssetsToGroup(r.Context(), id, req.AssetIDs); err != nil {
+	if err := h.service.AddAssetsToGroup(r.Context(), middleware.MustGetTenantID(r.Context()), id, req.AssetIDs); err != nil {
 		h.handleServiceError(w, err)
 		return
 	}
@@ -676,7 +676,7 @@ func (h *AssetGroupHandler) RemoveAssets(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.service.RemoveAssetsFromGroup(r.Context(), id, req.AssetIDs); err != nil {
+	if err := h.service.RemoveAssetsFromGroup(r.Context(), middleware.MustGetTenantID(r.Context()), id, req.AssetIDs); err != nil {
 		h.handleServiceError(w, err)
 		return
 	}

@@ -87,8 +87,17 @@ func (m *mockAssetGroupServiceRepo) GetByID(_ context.Context, id shared.ID) (*a
 	return g, nil
 }
 
-func (m *mockAssetGroupServiceRepo) GetByTenantAndID(ctx context.Context, _, id shared.ID) (*assetgroup.AssetGroup, error) {
-	return m.GetByID(ctx, id)
+func (m *mockAssetGroupServiceRepo) GetByTenantAndID(ctx context.Context, tenantID, id shared.ID) (*assetgroup.AssetGroup, error) {
+	g, err := m.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	// Enforce tenant scoping like the real repository (WHERE tenant_id = ?),
+	// so cross-tenant access surfaces as ErrNotFound.
+	if !g.TenantID().Equals(tenantID) {
+		return nil, shared.ErrNotFound
+	}
+	return g, nil
 }
 
 func (m *mockAssetGroupServiceRepo) Update(_ context.Context, _ shared.ID, group *assetgroup.AssetGroup) error {
@@ -1037,11 +1046,12 @@ func TestAddAssetsToGroup(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 		assetID1 := shared.NewID()
 		assetID2 := shared.NewID()
 
-		err := svc.AddAssetsToGroup(context.Background(), groupID, []string{assetID1.String(), assetID2.String()})
+		err := svc.AddAssetsToGroup(context.Background(), tenantID.String(), groupID, []string{assetID1.String(), assetID2.String()})
 		if err != nil {
 			t.Fatalf("AddAssetsToGroup failed: %v", err)
 		}
@@ -1060,9 +1070,10 @@ func TestAddAssetsToGroup(t *testing.T) {
 	t.Run("empty list", func(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 
-		err := svc.AddAssetsToGroup(context.Background(), groupID, []string{})
+		err := svc.AddAssetsToGroup(context.Background(), tenantID.String(), groupID, []string{})
 		if err != nil {
 			t.Fatalf("AddAssetsToGroup with empty list should succeed, got: %v", err)
 		}
@@ -1074,10 +1085,11 @@ func TestAddAssetsToGroup(t *testing.T) {
 	t.Run("invalid IDs filtered", func(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 		validID := shared.NewID()
 
-		err := svc.AddAssetsToGroup(context.Background(), groupID, []string{
+		err := svc.AddAssetsToGroup(context.Background(), tenantID.String(), groupID, []string{
 			validID.String(),
 			"not-a-uuid",
 			"also-invalid",
@@ -1098,9 +1110,10 @@ func TestAddAssetsToGroup(t *testing.T) {
 	t.Run("all invalid IDs returns nil", func(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 
-		err := svc.AddAssetsToGroup(context.Background(), groupID, []string{
+		err := svc.AddAssetsToGroup(context.Background(), tenantID.String(), groupID, []string{
 			"not-a-uuid",
 			"also-invalid",
 		})
@@ -1116,9 +1129,10 @@ func TestAddAssetsToGroup(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		repo.addAssetsErr = errors.New("constraint violation")
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 
-		err := svc.AddAssetsToGroup(context.Background(), groupID, []string{shared.NewID().String()})
+		err := svc.AddAssetsToGroup(context.Background(), tenantID.String(), groupID, []string{shared.NewID().String()})
 		if err == nil {
 			t.Fatal("expected error from repo")
 		}
@@ -1136,14 +1150,15 @@ func TestRemoveAssetsFromGroup(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 		assetID1 := shared.NewID()
 		assetID2 := shared.NewID()
 
 		// Pre-populate assets
 		repo.groupAssets[groupID.String()] = []shared.ID{assetID1, assetID2}
 
-		err := svc.RemoveAssetsFromGroup(context.Background(), groupID, []string{assetID1.String()})
+		err := svc.RemoveAssetsFromGroup(context.Background(), tenantID.String(), groupID, []string{assetID1.String()})
 		if err != nil {
 			t.Fatalf("RemoveAssetsFromGroup failed: %v", err)
 		}
@@ -1162,9 +1177,10 @@ func TestRemoveAssetsFromGroup(t *testing.T) {
 	t.Run("empty list", func(t *testing.T) {
 		repo := newMockAssetGroupServiceRepo()
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 
-		err := svc.RemoveAssetsFromGroup(context.Background(), groupID, []string{})
+		err := svc.RemoveAssetsFromGroup(context.Background(), tenantID.String(), groupID, []string{})
 		if err != nil {
 			t.Fatalf("RemoveAssetsFromGroup with empty list should succeed, got: %v", err)
 		}
@@ -1206,9 +1222,10 @@ func TestGetGroupAssets(t *testing.T) {
 			TotalPages: 1,
 		}
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 
-		result, err := svc.GetGroupAssets(context.Background(), groupID, 1, 20)
+		result, err := svc.GetGroupAssets(context.Background(), tenantID.String(), groupID, 1, 20)
 		if err != nil {
 			t.Fatalf("GetGroupAssets failed: %v", err)
 		}
@@ -1249,9 +1266,10 @@ func TestGetGroupFindings(t *testing.T) {
 			TotalPages: 1,
 		}
 		svc := newTestAssetGroupService(repo)
-		groupID := shared.NewID()
+		tenantID := shared.NewID()
+		groupID := seedAssetGroup(repo, tenantID, "Members", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
 
-		result, err := svc.GetGroupFindings(context.Background(), groupID, 1, 20)
+		result, err := svc.GetGroupFindings(context.Background(), tenantID.String(), groupID, 1, 20)
 		if err != nil {
 			t.Fatalf("GetGroupFindings failed: %v", err)
 		}
@@ -1263,6 +1281,71 @@ func TestGetGroupFindings(t *testing.T) {
 		}
 		if repo.getGroupFindingCalls != 1 {
 			t.Errorf("expected 1 GetGroupFindings call, got %d", repo.getGroupFindingCalls)
+		}
+	})
+}
+
+// =============================================================================
+// Tests for cross-tenant isolation (IDOR guard)
+// =============================================================================
+
+// TestAssetGroupMembershipTenantIsolation verifies that membership read/mutate
+// operations reject a group owned by another tenant, even when the caller
+// supplies the correct group UUID. The asset_group_members join table is keyed
+// only by group_id, so the service must verify group→tenant ownership first.
+func TestAssetGroupMembershipTenantIsolation(t *testing.T) {
+	repo := newMockAssetGroupServiceRepo()
+	svc := newTestAssetGroupService(repo)
+
+	tenantA := shared.NewID()
+	tenantB := shared.NewID()
+	groupID := seedAssetGroup(repo, tenantA, "Tenant A Group", assetgroup.EnvironmentProduction, assetgroup.CriticalityHigh).ID()
+	assetID := shared.NewID().String()
+
+	t.Run("AddAssets rejected cross-tenant", func(t *testing.T) {
+		err := svc.AddAssetsToGroup(context.Background(), tenantB.String(), groupID, []string{assetID})
+		if !errors.Is(err, shared.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+		if repo.addAssetsCalls != 0 {
+			t.Errorf("AddAssets must not run for cross-tenant group, got %d calls", repo.addAssetsCalls)
+		}
+	})
+
+	t.Run("RemoveAssets rejected cross-tenant", func(t *testing.T) {
+		err := svc.RemoveAssetsFromGroup(context.Background(), tenantB.String(), groupID, []string{assetID})
+		if !errors.Is(err, shared.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+		if repo.removeAssetsCalls != 0 {
+			t.Errorf("RemoveAssets must not run for cross-tenant group, got %d calls", repo.removeAssetsCalls)
+		}
+	})
+
+	t.Run("GetGroupAssets rejected cross-tenant", func(t *testing.T) {
+		_, err := svc.GetGroupAssets(context.Background(), tenantB.String(), groupID, 1, 20)
+		if !errors.Is(err, shared.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+		if repo.getGroupAssetsCalls != 0 {
+			t.Errorf("GetGroupAssets must not run for cross-tenant group, got %d calls", repo.getGroupAssetsCalls)
+		}
+	})
+
+	t.Run("GetGroupFindings rejected cross-tenant", func(t *testing.T) {
+		_, err := svc.GetGroupFindings(context.Background(), tenantB.String(), groupID, 1, 20)
+		if !errors.Is(err, shared.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got %v", err)
+		}
+		if repo.getGroupFindingCalls != 0 {
+			t.Errorf("GetGroupFindings must not run for cross-tenant group, got %d calls", repo.getGroupFindingCalls)
+		}
+	})
+
+	t.Run("owner tenant still allowed", func(t *testing.T) {
+		err := svc.AddAssetsToGroup(context.Background(), tenantA.String(), groupID, []string{shared.NewID().String()})
+		if err != nil {
+			t.Fatalf("owner tenant should be allowed, got %v", err)
 		}
 	})
 }

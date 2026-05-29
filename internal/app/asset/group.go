@@ -330,8 +330,28 @@ func (s *AssetGroupService) GetAssetGroupStats(ctx context.Context, tenantID str
 	return s.repo.GetStats(ctx, tid)
 }
 
+// verifyGroupTenant ensures the group belongs to the given tenant before any
+// membership operation. The asset_group_members queries are keyed only by
+// group_id (the join table has no tenant_id), so without this guard a caller
+// could read or mutate another tenant's group by supplying its UUID (IDOR).
+// Returns assetgroup.ErrNotFound (→ 404) when the group is not in the tenant.
+func (s *AssetGroupService) verifyGroupTenant(ctx context.Context, tenantIDStr string, groupID shared.ID) error {
+	tenantID, err := shared.IDFromString(tenantIDStr)
+	if err != nil {
+		return fmt.Errorf("%w: invalid tenant ID", shared.ErrValidation)
+	}
+	if _, err := s.repo.GetByTenantAndID(ctx, tenantID, groupID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // AddAssetsToGroup adds assets to a group.
-func (s *AssetGroupService) AddAssetsToGroup(ctx context.Context, groupID shared.ID, assetIDs []string) error {
+func (s *AssetGroupService) AddAssetsToGroup(ctx context.Context, tenantID string, groupID shared.ID, assetIDs []string) error {
+	if err := s.verifyGroupTenant(ctx, tenantID, groupID); err != nil {
+		return err
+	}
+
 	ids := make([]shared.ID, 0, len(assetIDs))
 	for _, idStr := range assetIDs {
 		id, err := shared.IDFromString(idStr)
@@ -371,7 +391,11 @@ func (s *AssetGroupService) AddAssetsToGroup(ctx context.Context, groupID shared
 }
 
 // RemoveAssetsFromGroup removes assets from a group.
-func (s *AssetGroupService) RemoveAssetsFromGroup(ctx context.Context, groupID shared.ID, assetIDs []string) error {
+func (s *AssetGroupService) RemoveAssetsFromGroup(ctx context.Context, tenantID string, groupID shared.ID, assetIDs []string) error {
+	if err := s.verifyGroupTenant(ctx, tenantID, groupID); err != nil {
+		return err
+	}
+
 	ids := make([]shared.ID, 0, len(assetIDs))
 	for _, idStr := range assetIDs {
 		id, err := shared.IDFromString(idStr)
@@ -411,13 +435,19 @@ func (s *AssetGroupService) RemoveAssetsFromGroup(ctx context.Context, groupID s
 }
 
 // GetGroupAssets retrieves assets in a group.
-func (s *AssetGroupService) GetGroupAssets(ctx context.Context, groupID shared.ID, pageNum, perPage int) (pagination.Result[*assetgroupdom.GroupAsset], error) {
+func (s *AssetGroupService) GetGroupAssets(ctx context.Context, tenantID string, groupID shared.ID, pageNum, perPage int) (pagination.Result[*assetgroupdom.GroupAsset], error) {
+	if err := s.verifyGroupTenant(ctx, tenantID, groupID); err != nil {
+		return pagination.Result[*assetgroupdom.GroupAsset]{}, err
+	}
 	page := pagination.New(pageNum, perPage)
 	return s.repo.GetGroupAssets(ctx, groupID, page)
 }
 
 // GetGroupFindings retrieves findings for assets in a group.
-func (s *AssetGroupService) GetGroupFindings(ctx context.Context, groupID shared.ID, pageNum, perPage int) (pagination.Result[*assetgroupdom.GroupFinding], error) {
+func (s *AssetGroupService) GetGroupFindings(ctx context.Context, tenantID string, groupID shared.ID, pageNum, perPage int) (pagination.Result[*assetgroupdom.GroupFinding], error) {
+	if err := s.verifyGroupTenant(ctx, tenantID, groupID); err != nil {
+		return pagination.Result[*assetgroupdom.GroupFinding]{}, err
+	}
 	page := pagination.New(pageNum, perPage)
 	return s.repo.GetGroupFindings(ctx, groupID, page)
 }
