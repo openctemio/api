@@ -1340,46 +1340,51 @@ func (s *AssetService) ArchiveStaleAssets(ctx context.Context, tenantID string, 
 
 	cutoff := time.Now().AddDate(0, 0, -staleDays)
 
-	// Find stale assets: last_seen < cutoff AND status = active
-	filter := assetdom.Filter{
-		TenantID: &tenantID,
-	}
-	// Use list with pagination to process in batches
-	page := pagination.Pagination{Page: 1, PerPage: 500}
-	result, err := s.repo.List(ctx, filter, assetdom.ListOptions{}, page)
-	if err != nil {
-		return 0, fmt.Errorf("failed to list assets for lifecycle check: %w", err)
-	}
+	// Find stale assets: last_seen < cutoff AND status = active. Constrain the
+	// query to active assets (so the batch window isn't wasted on archived/
+	// inactive rows) and loop over ALL pages — the previous single-page fetch
+	// silently left every asset beyond the first 500 un-archived.
+	filter := assetdom.NewFilter().WithTenantID(tenantID).WithStatuses(assetdom.StatusActive)
 
+	const batchSize = 500
 	var archived int64
-	for _, a := range result.Data {
-		if a.Status() == assetdom.StatusArchived {
-			continue
-		}
-		lastSeen := a.LastSeen()
-		if lastSeen.IsZero() || lastSeen.After(cutoff) {
-			continue
+	for pageNum := 1; ; pageNum++ {
+		page := pagination.New(pageNum, batchSize)
+		result, err := s.repo.List(ctx, filter, assetdom.ListOptions{}, page)
+		if err != nil {
+			return archived, fmt.Errorf("failed to list assets for lifecycle check: %w", err)
 		}
 
-		if dryRun {
-			s.logger.Info("would archive stale asset (dry run)",
-				"id", a.ID().String(), "name", a.Name(),
-				"last_seen", lastSeen.Format(time.RFC3339))
+		for _, a := range result.Data {
+			lastSeen := a.LastSeen()
+			if lastSeen.IsZero() || lastSeen.After(cutoff) {
+				continue
+			}
+
+			if dryRun {
+				s.logger.Info("would archive stale asset (dry run)",
+					"id", a.ID().String(), "name", a.Name(),
+					"last_seen", lastSeen.Format(time.RFC3339))
+				archived++
+				continue
+			}
+
+			a.Archive()
+			if err := s.repo.Update(ctx, a); err != nil {
+				s.logger.Warn("failed to archive stale asset",
+					"id", a.ID().String(), "error", err)
+				continue
+			}
 			archived++
-			continue
+			s.logger.Info("archived stale asset",
+				"id", a.ID().String(), "name", a.Name(),
+				"last_seen", lastSeen.Format(time.RFC3339),
+				"stale_days", staleDays)
 		}
 
-		a.Archive()
-		if err := s.repo.Update(ctx, a); err != nil {
-			s.logger.Warn("failed to archive stale asset",
-				"id", a.ID().String(), "error", err)
-			continue
+		if len(result.Data) < batchSize {
+			break
 		}
-		archived++
-		s.logger.Info("archived stale asset",
-			"id", a.ID().String(), "name", a.Name(),
-			"last_seen", lastSeen.Format(time.RFC3339),
-			"stale_days", staleDays)
 	}
 
 	return archived, nil

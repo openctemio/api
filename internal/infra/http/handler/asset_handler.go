@@ -1962,6 +1962,17 @@ func (h *AssetHandler) UpdateCrownJewel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Bound the business impact score to 0–100 (same range as risk_score);
+	// the inline struct isn't run through the validator, so check explicitly.
+	if req.BusinessImpactScore < 0 || req.BusinessImpactScore > 100 {
+		apierror.BadRequest("business_impact_score must be between 0 and 100").WriteJSON(w)
+		return
+	}
+	if len(req.BusinessImpactNotes) > 2000 {
+		apierror.BadRequest("business_impact_notes must be at most 2000 characters").WriteJSON(w)
+		return
+	}
+
 	a, err := h.service.GetAsset(r.Context(), tenantID, assetID)
 	if err != nil {
 		h.handleServiceError(w, err)

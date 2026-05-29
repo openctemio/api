@@ -325,7 +325,7 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 	}
 
 	// Initialize component & branch services
-	s.Component = app.NewComponentService(repos.Component, log)
+	s.Component = app.NewComponentService(repos.Component, repos.Asset, log)
 	s.SBOMImport = app.NewSBOMImportService(repos.Component, repos.Asset, log)
 	s.ReportSchedule = app.NewReportScheduleService(repos.ReportSchedule, log)
 	s.Branch = app.NewBranchService(repos.Branch, log)
@@ -457,7 +457,7 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 	s.Simulation = app.NewSimulationService(repos.Simulation, repos.ControlTest, log)
 	s.ThreatActor = threat.NewActorService(repos.ThreatActor, log)
 	s.RemediationCampaign = app.NewRemediationCampaignService(repos.RemediationCampaign, log)
-	s.BusinessUnit = app.NewBusinessUnitService(repos.BusinessUnit, log)
+	s.BusinessUnit = app.NewBusinessUnitService(repos.BusinessUnit, repos.Asset, log)
 
 	s.Compliance = app.NewComplianceService(
 		repos.ComplianceFramework, repos.ComplianceControl,

@@ -113,6 +113,17 @@ func isCheckViolation(err error) bool {
 	return false
 }
 
+// isForeignKeyViolation checks if the error is a PostgreSQL foreign-key violation
+// (SQLSTATE 23503) — e.g. referencing an asset/row that does not exist. Callers
+// should map this to a 400/404 rather than a 500.
+func isForeignKeyViolation(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "23503"
+	}
+	return false
+}
+
 // parseIP parses an IP address string into net.IP.
 func parseIP(s string) net.IP {
 	return net.ParseIP(s)
