@@ -5,8 +5,11 @@ import (
 	"testing"
 
 	"github.com/lib/pq"
+	"github.com/openctemio/api/internal/app/ingest"
 	"github.com/openctemio/api/internal/infra/postgres"
 	"github.com/openctemio/api/pkg/domain/shared"
+	"github.com/openctemio/api/pkg/logger"
+	"github.com/openctemio/ctis"
 )
 
 // TestApproveAndMerge_ConflictSafe verifies that merging duplicate assets:
@@ -173,5 +176,69 @@ func TestUpsertReview_Idempotent(t *testing.T) {
 	// cleanup
 	_, _ = db.Exec(`DELETE FROM assets WHERE id=$1`, keep.String())
 	_, _ = db.Exec(`DELETE FROM asset_dedup_review WHERE tenant_id=$1`, tenant.String())
+	_, _ = db.Exec(`DELETE FROM tenants WHERE id=$1`, tenant.String())
+}
+
+// TestIngestEnqueuesDedupReview exercises the REAL end-to-end path that was
+// never verified: two existing host assets share an IP, an incoming scan asset
+// with that IP arrives, the correlator detects the multi-match, and the
+// processor enqueues a pending dedup review (previously MergeTargets was dropped).
+func TestIngestEnqueuesDedupReview(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	tenant := createTestTenant(t, db, "ingestdedup")
+
+	// Two existing host assets sharing IP 10.0.0.5, non-stale (last_seen NOW).
+	hostA, hostB := shared.NewID(), shared.NewID()
+	for _, h := range []struct {
+		id   shared.ID
+		name string
+	}{{hostA, "host-a-ingestdedup"}, {hostB, "host-b-ingestdedup"}} {
+		if _, err := db.Exec(`INSERT INTO assets
+			(id, tenant_id, name, asset_type, criticality, status, properties, last_seen, created_at, updated_at)
+			VALUES ($1,$2,$3,'host','medium','active','{"ip":"10.0.0.5"}', NOW(), NOW(), NOW())`,
+			h.id.String(), tenant.String(), h.name); err != nil {
+			t.Fatalf("seed host %s: %v", h.name, err)
+		}
+	}
+
+	log := logger.NewNop()
+	repo := postgres.NewAssetRepository(&postgres.DB{DB: db})
+	dedupRepo := postgres.NewAssetDedupRepository(&postgres.DB{DB: db})
+	proc := ingest.NewAssetProcessor(repo, log)
+	proc.SetCorrelator(ingest.NewAssetCorrelator(repo, log, ingest.CorrelationConfig{StaleAssetDays: 30, MaxIPsPerAsset: 20}))
+	proc.SetDedupEnqueuer(dedupRepo)
+
+	// Incoming asset: a host with the shared IP and a NON-matching name.
+	report := &ctis.Report{
+		Assets: []ctis.Asset{{
+			ID:         "incoming-1",
+			Type:       ctis.AssetType("host"),
+			Value:      "scanner-discovered-host",
+			Name:       "scanner-discovered-host",
+			Properties: ctis.Properties{"ip": "10.0.0.5"},
+		}},
+	}
+	out := &ingest.Output{}
+	if _, err := proc.ProcessBatch(ctx, tenant, report, out, nil); err != nil {
+		t.Fatalf("ProcessBatch: %v", err)
+	}
+
+	pending, err := dedupRepo.ListPendingReviews(ctx, tenant.String())
+	if err != nil {
+		t.Fatalf("ListPendingReviews: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending dedup review from ingest correlation, got %d (MergeTargets likely still dropped)", len(pending))
+	}
+	if len(pending[0].MergeAssetIDs) != 1 {
+		t.Errorf("expected 1 merge target, got %d", len(pending[0].MergeAssetIDs))
+	}
+
+	// cleanup
+	_, _ = db.Exec(`DELETE FROM asset_dedup_review WHERE tenant_id=$1`, tenant.String())
+	_, _ = db.Exec(`DELETE FROM assets WHERE tenant_id=$1`, tenant.String())
 	_, _ = db.Exec(`DELETE FROM tenants WHERE id=$1`, tenant.String())
 }
