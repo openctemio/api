@@ -150,6 +150,7 @@ func (r *AssetDedupRepository) ApproveAndMerge(ctx context.Context, tenantID str
 		if _, err = tx.ExecContext(ctx, "SAVEPOINT sp_move"); err != nil {
 			return fmt.Errorf("savepoint: %w", err)
 		}
+		//nolint:gosec // G201: `table` is an internal constant from plainTables, never user input.
 		q := fmt.Sprintf("UPDATE %s SET asset_id = $1 WHERE asset_id = ANY($2) AND tenant_id = $3", table)
 		if _, e := tx.ExecContext(ctx, q, keepID, pq.Array(mergeIDs), tenantID); e != nil {
 			if isUndefinedTableError(e) {
@@ -182,7 +183,7 @@ func (r *AssetDedupRepository) ApproveAndMerge(ctx context.Context, tenantID str
 		{"asset_group_members", "", "ctid", []string{"asset_group_id"}}, // no tenant_id / id col
 	}
 	for _, t := range uniqueTables {
-		if err = r.repointUnique(ctx, tx, t.table, "asset_id", t.tenantCol, t.idCol, t.keyCols, keepID, mergeIDs, tenantID); err != nil {
+		if err := r.repointUnique(ctx, tx, t.table, "asset_id", t.tenantCol, t.idCol, t.keyCols, keepID, mergeIDs, tenantID); err != nil {
 			return err
 		}
 	}
@@ -197,11 +198,11 @@ func (r *AssetDedupRepository) ApproveAndMerge(ctx context.Context, tenantID str
 	if _, err = tx.ExecContext(ctx, selfLoop, keepID, pq.Array(mergeIDs), tenantID); err != nil {
 		return fmt.Errorf("drop self-loop relationships: %w", err)
 	}
-	if err = r.repointUnique(ctx, tx, "asset_relationships", "source_asset_id", "tenant_id", "id",
+	if err := r.repointUnique(ctx, tx, "asset_relationships", "source_asset_id", "tenant_id", "id",
 		[]string{"target_asset_id", "relationship_type"}, keepID, mergeIDs, tenantID); err != nil {
 		return err
 	}
-	if err = r.repointUnique(ctx, tx, "asset_relationships", "target_asset_id", "tenant_id", "id",
+	if err := r.repointUnique(ctx, tx, "asset_relationships", "target_asset_id", "tenant_id", "id",
 		[]string{"source_asset_id", "relationship_type"}, keepID, mergeIDs, tenantID); err != nil {
 		return err
 	}
@@ -292,6 +293,7 @@ func (r *AssetDedupRepository) repointUnique(
 		kT = fmt.Sprintf(" AND k.%s = $3", tenantCol)
 		args1 = append(args1, tenantID)
 	}
+	//nolint:gosec // G201: table/fk/key identifiers come from the fixed uniqueTables/relationship lists, never user input.
 	q1 := fmt.Sprintf(`DELETE FROM %[1]s m WHERE m.%[2]s = ANY($2)%[3]s
 		AND EXISTS (SELECT 1 FROM %[1]s k WHERE k.%[2]s = $1%[4]s AND %[5]s)`,
 		table, fk, mT, kT, keyMatch("k", "m"))
@@ -310,6 +312,7 @@ func (r *AssetDedupRepository) repointUnique(
 		bT = fmt.Sprintf(" AND b.%s = $2", tenantCol)
 		args2 = append(args2, tenantID)
 	}
+	//nolint:gosec // G201: table/fk/key identifiers come from the fixed uniqueTables/relationship lists, never user input.
 	q2 := fmt.Sprintf(`DELETE FROM %[1]s m WHERE m.%[2]s = ANY($1)%[3]s
 		AND EXISTS (SELECT 1 FROM %[1]s b WHERE b.%[2]s = ANY($1)%[5]s AND %[4]s AND b.%[6]s < m.%[6]s)`,
 		table, fk, mT2, keyMatch("b", "m"), bT, idCol)
@@ -323,6 +326,7 @@ func (r *AssetDedupRepository) repointUnique(
 		upT = fmt.Sprintf(" AND %s = $3", tenantCol)
 		args3 = append(args3, tenantID)
 	}
+	//nolint:gosec // G201: table/fk identifiers come from the fixed uniqueTables/relationship lists, never user input.
 	q3 := fmt.Sprintf(`UPDATE %[1]s SET %[2]s = $1 WHERE %[2]s = ANY($2)%[3]s`, table, fk, upT)
 	if _, err := tx.ExecContext(ctx, q3, args3...); err != nil {
 		return fmt.Errorf("move %s: %w", table, err)
