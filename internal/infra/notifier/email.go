@@ -184,12 +184,15 @@ func (c *EmailClient) sendSMTP(ctx context.Context, message []byte) error {
 	}
 	defer func() { _ = client.Close() }()
 
-	// STARTTLS if required (port 587)
+	// STARTTLS if required (port 587). Fail closed: if STARTTLS was requested
+	// but the server does not advertise it, refuse rather than silently send
+	// credentials + message in cleartext (downgrade/strip protection).
 	if c.config.UseSTARTTLS && !c.config.UseTLS {
-		if ok, _ := client.Extension("STARTTLS"); ok {
-			if err = client.StartTLS(tlsConfig); err != nil {
-				return fmt.Errorf("STARTTLS: %w", err)
-			}
+		if ok, _ := client.Extension("STARTTLS"); !ok {
+			return fmt.Errorf("STARTTLS requested but not supported by server %s", c.config.SMTPHost)
+		}
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("STARTTLS: %w", err)
 		}
 	}
 
