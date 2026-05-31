@@ -160,7 +160,7 @@ func (s *RemediationCampaignService) UpdateCampaignStatus(ctx context.Context, t
 			campaign.RecordRiskReduction(before, after)
 		}
 	case remediation.CampaignStatusCanceled:
-		campaign.Cancel()
+		err = campaign.Cancel()
 	default:
 		return nil, fmt.Errorf("%w: invalid status: %s", shared.ErrValidation, newStatus)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	emailpkg "github.com/openctemio/api/pkg/email"
+	"github.com/openctemio/api/pkg/httpsec"
 )
 
 // EmailClient implements the Client interface for email notifications via SMTP.
@@ -141,7 +142,13 @@ func (c *EmailClient) TestConnection(ctx context.Context) (*SendResult, error) {
 }
 
 // sendSMTP sends an email via SMTP.
-func (c *EmailClient) sendSMTP(_ context.Context, message []byte) error {
+func (c *EmailClient) sendSMTP(ctx context.Context, message []byte) error {
+	// SSRF guard: a tenant controls SMTPHost, so block loopback / link-local
+	// (cloud IMDS) / RFC1918 targets before dialing (internal relays require
+	// the operator allow-private flag, same as outbound webhooks).
+	if err := httpsec.ValidateHost(ctx, c.config.SMTPHost); err != nil {
+		return fmt.Errorf("smtp host rejected: %w", err)
+	}
 	addr := net.JoinHostPort(c.config.SMTPHost, strconv.Itoa(c.config.SMTPPort))
 
 	// Create TLS config
