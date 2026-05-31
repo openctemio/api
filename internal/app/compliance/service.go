@@ -255,7 +255,11 @@ func (s *ComplianceService) MapFindingToControl(ctx context.Context, tenantID, f
 
 	impactType := compliancedom.ImpactDirect
 	if impact != "" {
-		impactType = compliancedom.ImpactType(impact)
+		parsed, perr := compliancedom.ParseImpactType(impact)
+		if perr != nil {
+			return nil, fmt.Errorf("%w: %v", shared.ErrValidation, perr)
+		}
+		impactType = parsed
 	}
 
 	mapping := compliancedom.NewFindingControlMapping(tid, fid, cid, impactType)
