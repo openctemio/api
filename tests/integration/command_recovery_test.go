@@ -463,23 +463,6 @@ func cleanupCommandTestData(db *sql.DB, tenantID shared.ID) {
 	db.Exec("DELETE FROM tenants WHERE id = $1", tenantID.String())
 }
 
-// createTestRecentCommand creates a command that was just created (not stuck).
-func createTestRecentCommand(t *testing.T, db *sql.DB, tenantID, agentID shared.ID, status string, dispatchAttempts int) shared.ID {
-	t.Helper()
-
-	id := shared.NewID()
-
-	_, err := db.Exec(`
-		INSERT INTO commands (id, tenant_id, agent_id, type, status, payload, is_platform_job, dispatch_attempts, created_at)
-		VALUES ($1, $2, $3, 'scan', $4, '{}', false, $5, NOW())
-	`, id.String(), tenantID.String(), agentID.String(), status, dispatchAttempts)
-	if err != nil {
-		t.Fatalf("Failed to create test recent command: %v", err)
-	}
-
-	return id
-}
-
 // createTestAckStuckCommand creates an 'acknowledged' tenant command that was
 // acknowledged long ago (stuck) and is still assigned to an agent. This is the
 // state recover_stuck_tenant_commands acts on: an agent acknowledged the
