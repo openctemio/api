@@ -628,6 +628,27 @@ func (r *ComponentRepository) buildWhereClause(filter component.Filter) (string,
 		conditions = append(conditions, fmt.Sprintf("ecosystem IN (%s)", strings.Join(placeholders, ", ")))
 	}
 
+	// Tenant / asset scoping. The components table is a GLOBAL catalogue (no
+	// tenant_id), so restrict to components actually linked to the caller's
+	// tenant (and optionally a specific asset) via asset_components. Without
+	// this the list/export returned the entire cross-tenant catalogue even
+	// though the service set TenantID on the filter.
+	if filter.TenantID != nil {
+		sub := fmt.Sprintf("SELECT component_id FROM asset_components WHERE tenant_id = $%d", argIndex)
+		args = append(args, filter.TenantID.String())
+		argIndex++
+		if filter.AssetID != nil {
+			sub += fmt.Sprintf(" AND asset_id = $%d", argIndex)
+			args = append(args, filter.AssetID.String())
+			argIndex++
+		}
+		conditions = append(conditions, fmt.Sprintf("id IN (%s)", sub))
+	} else if filter.AssetID != nil {
+		conditions = append(conditions, fmt.Sprintf("id IN (SELECT component_id FROM asset_components WHERE asset_id = $%d)", argIndex))
+		args = append(args, filter.AssetID.String())
+		argIndex++
+	}
+
 	return strings.Join(conditions, " AND "), args
 }
 
