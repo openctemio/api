@@ -151,6 +151,13 @@ func (h *AttachmentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	buf := make([]byte, 512)
 	n, _ := file.Read(buf)
 	contentType := http.DetectContentType(buf[:n])
+	// http.DetectContentType returns parameters (e.g. "text/plain; charset=utf-8");
+	// strip them so the comparisons below and the service allowlist match on the
+	// bare media type. Without this, every textual upload (.md/.csv/.txt/.har)
+	// was rejected as unsupported.
+	if mt, _, perr := mime.ParseMediaType(contentType); perr == nil {
+		contentType = mt
+	}
 	// Reset reader — Seek back to start
 	if seeker, ok := file.(io.Seeker); ok {
 		_, _ = seeker.Seek(0, io.SeekStart)
