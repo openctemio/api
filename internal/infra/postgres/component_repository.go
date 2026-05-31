@@ -633,20 +633,21 @@ func (r *ComponentRepository) buildWhereClause(filter component.Filter) (string,
 	// tenant (and optionally a specific asset) via asset_components. Without
 	// this the list/export returned the entire cross-tenant catalogue even
 	// though the service set TenantID on the filter.
+	// This is the last block that consumes argIndex, so it is not incremented
+	// after the final placeholder (matches the convention in the other
+	// buildWhereClause functions and avoids a dead-store).
 	if filter.TenantID != nil {
 		sub := fmt.Sprintf("SELECT component_id FROM asset_components WHERE tenant_id = $%d", argIndex)
 		args = append(args, filter.TenantID.String())
-		argIndex++
 		if filter.AssetID != nil {
+			argIndex++
 			sub += fmt.Sprintf(" AND asset_id = $%d", argIndex)
 			args = append(args, filter.AssetID.String())
-			argIndex++
 		}
 		conditions = append(conditions, fmt.Sprintf("id IN (%s)", sub))
 	} else if filter.AssetID != nil {
 		conditions = append(conditions, fmt.Sprintf("id IN (SELECT component_id FROM asset_components WHERE asset_id = $%d)", argIndex))
 		args = append(args, filter.AssetID.String())
-		argIndex++
 	}
 
 	return strings.Join(conditions, " AND "), args
