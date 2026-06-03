@@ -728,7 +728,7 @@ func TestBranchService_DeleteBranch_CannotDeleteDefault(t *testing.T) {
 	}
 }
 
-func TestBranchService_DeleteBranch_EmptyRepositoryIDSkipsChecks(t *testing.T) {
+func TestBranchService_DeleteBranch_EmptyRepositoryIDRejected(t *testing.T) {
 	svc, repo := newTestBranchService()
 	ctx := context.Background()
 	repoID := shared.NewID()
@@ -736,9 +736,15 @@ func TestBranchService_DeleteBranch_EmptyRepositoryIDSkipsChecks(t *testing.T) {
 	b := makeBranchSvcTestBranch(repoID, "feature/y", false)
 	repo.branches[b.ID().String()] = b
 
+	// repositoryID is required — an empty value must be rejected, NOT silently
+	// skip the ownership + default-branch checks and delete the branch.
 	err := svc.DeleteBranch(ctx, b.ID().String(), "")
-	if err != nil {
-		t.Fatalf("expected no error when repositoryID is empty, got %v", err)
+	if !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("expected ErrValidation for empty repositoryID, got %v", err)
+	}
+	// The branch must still exist (not deleted).
+	if _, ok := repo.branches[b.ID().String()]; !ok {
+		t.Fatal("branch must not be deleted when repositoryID is empty")
 	}
 }
 
