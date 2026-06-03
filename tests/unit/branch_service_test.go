@@ -612,7 +612,7 @@ func TestBranchService_UpdateBranch_IDORPrevention(t *testing.T) {
 	}
 }
 
-func TestBranchService_UpdateBranch_EmptyRepositoryIDSkipsIDOR(t *testing.T) {
+func TestBranchService_UpdateBranch_EmptyRepositoryIDRejected(t *testing.T) {
 	svc, repo := newTestBranchService()
 	ctx := context.Background()
 	repoID := shared.NewID()
@@ -620,12 +620,11 @@ func TestBranchService_UpdateBranch_EmptyRepositoryIDSkipsIDOR(t *testing.T) {
 	b := makeBranchSvcTestBranch(repoID, "main", true)
 	repo.branches[b.ID().String()] = b
 
-	result, err := svc.UpdateBranch(ctx, b.ID().String(), "", app.UpdateBranchInput{})
-	if err != nil {
-		t.Fatalf("expected no error when repositoryID is empty, got %v", err)
-	}
-	if result.ID() != b.ID() {
-		t.Error("expected to get the branch back")
+	// repositoryID is required — an empty value must be rejected, not skip the
+	// IDOR ownership check.
+	_, err := svc.UpdateBranch(ctx, b.ID().String(), "", app.UpdateBranchInput{})
+	if !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("expected ErrValidation for empty repositoryID, got %v", err)
 	}
 }
 

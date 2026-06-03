@@ -119,6 +119,11 @@ func (s *BranchService) UpdateBranch(ctx context.Context, branchID, repositoryID
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid id format", shared.ErrValidation)
 	}
+	// repositoryID is REQUIRED — it scopes the IDOR check below. An empty value
+	// must not skip the ownership check (footgun for future callers).
+	if repositoryID == "" {
+		return nil, fmt.Errorf("%w: repository id is required", shared.ErrValidation)
+	}
 
 	b, err := s.repo.GetByID(ctx, parsedID)
 	if err != nil {
@@ -126,7 +131,7 @@ func (s *BranchService) UpdateBranch(ctx context.Context, branchID, repositoryID
 	}
 
 	// IDOR prevention: verify branch belongs to the repository
-	if repositoryID != "" && b.RepositoryID().String() != repositoryID {
+	if b.RepositoryID().String() != repositoryID {
 		return nil, shared.ErrNotFound
 	}
 
