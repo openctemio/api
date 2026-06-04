@@ -19,6 +19,8 @@ Code today (`internal/app/jira/sync_service.go`, `internal/infra/jira/client.go`
 - **Links**: a finding ↔ ticket link is a URL in `finding.WorkItemURIs()` (generic list), not a typed link with provider/issue-key/project.
 - **Already shipped (this milestone)**: idempotent create (one ticket per finding+project, #134) and secret redaction in descriptions (#135). Config storage already exists per-integration: `Integration.Config() map[string]any` (JSONB) + `Metadata()`.
 
+> **⚠ Blocking finding (2026-06-04): outbound ticket creation is currently non-functional.** `cmd/server/services.go` builds the sync service as `jira.NewSyncService(repos.Finding, nil, log)` — the Jira client is **nil**, and `jira.NewClient` is **never called anywhere** in `internal/`/`cmd/`. So `CreateTicketFromFinding` always returns `"Jira integration not configured"` and `POST /findings/{id}/create-ticket` is effectively dead. Only the **inbound** webhook works (it needs no client — it just updates the finding). **Per-tenant client resolution is the real Phase 0** and a prerequisite for everything below; until it exists, configurable mapping/outbound have nothing to run against. Mirror the per-tenant SMTP resolver (`TenantSMTPResolver`/`IntegrationSMTPResolver`): resolve the tenant's active integration, decrypt its credentials (AES-256-GCM, `APP_ENCRYPTION_KEY`), and build a client on demand.
+
 ## 2. Goals / Non-goals
 
 **Goals**
@@ -89,10 +91,11 @@ Keep `WorkItemURIs` for back-compat; optionally add a `finding_tickets` associat
 
 ## 4. Backward compatibility & rollout
 
-1. **Phase 0** — `TicketProvider` interface; Jira `Client` conforms (add `Transition`/`AddComment`). `MappingConfig` loader with defaults = today's hardcoded maps. No behaviour change.
-2. **Phase 1** — wire configurable mapping into create + inbound webhook (read `config.ticketing`, fall back to defaults).
-3. **Phase 2** — outbound status sync via the async worker + echo-guard, behind a per-integration flag (default off).
-4. **Phase 3** — second provider (GitHub Issues or ServiceNow) to validate the abstraction; optional typed `finding_tickets` table + mapping UI.
+0. **Phase 0 (prerequisite — makes outbound actually work)** — per-tenant Jira **client resolution**: a resolver that loads the tenant's active Jira integration, decrypts its credentials, and builds a `jira.Client` on demand (mirrors `IntegrationSMTPResolver`). Without this, every outbound path is a no-op. Wire it into `SyncService` (resolve per call) so `CreateTicketFromFinding` works.
+1. **Phase 1** — `TicketProvider` interface; Jira `Client` conforms (add `Transition`/`AddComment`). `MappingConfig` loader with defaults = today's hardcoded maps. No behaviour change.
+2. **Phase 2** — wire configurable mapping into create + inbound webhook (read `config.ticketing`, fall back to defaults).
+3. **Phase 3** — outbound status sync via the async worker + echo-guard, behind a per-integration flag (default off).
+4. **Phase 4** — second provider (GitHub Issues or ServiceNow) to validate the abstraction; optional typed `finding_tickets` table + mapping UI.
 
 ## 5. Alternatives considered
 
