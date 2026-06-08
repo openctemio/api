@@ -99,10 +99,12 @@ Two independent, layered defenses — either alone breaks the loop; together the
 
 1. **State compare (idempotency).** Never act if already in the target state.
    - *Outbound*: before transitioning, if `target == link.last_inbound_status` **or** `target == provider.GetStatus(issueKey)` → skip (Jira is already there; we'd just echo).
-   - *Inbound*: if the incoming Jira status maps to the finding's **current** status → skip update (no-op), and if it equals `link.last_pushed_status` → it's our own push reflected back → skip.
+   - *Inbound*: if the incoming Jira status maps to the finding's **current** status → skip update (no-op); and if it equals `link.last_pushed_status` **within a short echo window** (`now − last_pushed_at < echoTTL`, e.g. 2 min) → it's our own push reflected back → skip.
 2. **Provenance tag.** When the inbound webhook applies a change, mark the status-change event `origin = "jira_webhook"`. The outbound trigger (§3.5) ignores changes whose origin is `jira_webhook`. (Implemented as a context value on the transition call or a field on the emitted domain event — *not* persisted state.)
 
 `last_pushed_status` / `last_inbound_status` on `ticket_links` are updated **in the same tx** as the corresponding change, so the compare is authoritative.
+
+> **Why the echo window matters (bug avoided).** A *bare* "skip inbound if status == last_pushed" wrongly suppresses a **later legitimate** re-set to the same status — e.g. OpenCTEM pushes `Done` (echo skipped, correct), the card later moves away, then weeks later a human drags it back to `Done`: with no time bound, that real change matches the stale `last_pushed = Done` and is silently dropped. Bounding the echo-match to `echoTTL` after `last_pushed_at` (and clearing `last_pushed_status` once the echo is consumed) makes echoes vanish while genuine later changes always apply. The provenance tag (defense #2) is the primary loop-breaker; the windowed compare is the safety net for missed/duplicated webhooks.
 
 ### 3.5 Outbound trigger + reliable delivery (reuse the outbox)
 
