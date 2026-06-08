@@ -132,3 +132,53 @@ func TestFirstJiraIssueKey(t *testing.T) {
 		}
 	}
 }
+
+type stubMappingResolver struct {
+	mapping MappingConfig
+	err     error
+}
+
+func (r stubMappingResolver) ResolveMapping(_ context.Context, _ shared.ID) (MappingConfig, error) {
+	return r.mapping, r.err
+}
+
+func TestSyncFindingStatus_NoResolverIsNoop(t *testing.T) {
+	c := &recordingClient{curStatus: "To Do"}
+	repo := &stubFindingRepo{finding: findingInProgress(t, "https://x.atlassian.net/browse/SEC-1")}
+	s := newSync(repo, c) // no mapping resolver wired
+
+	if err := s.SyncFindingStatus(context.Background(), shared.NewID(), shared.NewID()); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(c.transitions) != 0 {
+		t.Fatalf("no mapping resolver must be a no-op; got %v", c.transitions)
+	}
+}
+
+func TestSyncFindingStatus_NoIntegrationIsNoop(t *testing.T) {
+	c := &recordingClient{curStatus: "To Do"}
+	repo := &stubFindingRepo{finding: findingInProgress(t, "https://x.atlassian.net/browse/SEC-1")}
+	s := newSync(repo, c)
+	s.SetMappingResolver(stubMappingResolver{err: ErrNoTicketingIntegration})
+
+	if err := s.SyncFindingStatus(context.Background(), shared.NewID(), shared.NewID()); err != nil {
+		t.Fatalf("ErrNoTicketingIntegration must be swallowed as no-op; got %v", err)
+	}
+	if len(c.transitions) != 0 {
+		t.Fatalf("no integration must be a no-op; got %v", c.transitions)
+	}
+}
+
+func TestSyncFindingStatus_ResolvesAndPushes(t *testing.T) {
+	c := &recordingClient{curStatus: "To Do"}
+	repo := &stubFindingRepo{finding: findingInProgress(t, "https://x.atlassian.net/browse/SEC-1")}
+	s := newSync(repo, c)
+	s.SetMappingResolver(stubMappingResolver{mapping: enabledMapping()})
+
+	if err := s.SyncFindingStatus(context.Background(), shared.NewID(), shared.NewID()); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(c.transitions) != 1 || c.transitions[0] != "In Progress" {
+		t.Fatalf("expected resolved mapping to drive a transition to 'In Progress', got %v", c.transitions)
+	}
+}

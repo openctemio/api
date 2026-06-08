@@ -101,6 +101,14 @@ type ClientResolver interface {
 	Resolve(ctx context.Context, tenantID shared.ID) (Client, error)
 }
 
+// MappingResolver loads a tenant's ticketing MappingConfig (status maps +
+// sync_enabled) from its integration config. Counterpart to ClientResolver,
+// used by outbound status sync to decide whether/where to push. Returning
+// ErrNoTicketingIntegration means the tenant has no Jira integration.
+type MappingResolver interface {
+	ResolveMapping(ctx context.Context, tenantID shared.ID) (MappingConfig, error)
+}
+
 // ErrNoTicketingIntegration is returned by a ClientResolver when the tenant has
 // no connected Jira integration to create tickets against. It wraps
 // ErrValidation so the HTTP layer maps it to a 400 rather than a 500.
@@ -140,6 +148,10 @@ type SyncService struct {
 	// the tenant's integration credentials per request.
 	clientResolver ClientResolver
 
+	// mappingResolver loads the per-tenant status maps + sync_enabled flag for
+	// outbound sync (SyncFindingStatus). nil → outbound sync is inert.
+	mappingResolver MappingResolver
+
 	// B3: optional hook fired when a Jira webhook transitions
 	// a finding into `fix_applied`. Wired to the verification-scan
 	// trigger to close the "Jira Done → auto rescan" feedback edge
@@ -177,6 +189,30 @@ func (s *SyncService) SetPostFixAppliedHook(h FixAppliedHook) {
 // the tenant's integration instead of relying on the static client.
 func (s *SyncService) SetClientResolver(r ClientResolver) {
 	s.clientResolver = r
+}
+
+// SetMappingResolver wires the per-tenant mapping resolver for outbound status
+// sync. Safe to call after construction; nil disables outbound sync.
+func (s *SyncService) SetMappingResolver(r MappingResolver) {
+	s.mappingResolver = r
+}
+
+// SyncFindingStatus is the async entrypoint for outbound status sync: it
+// resolves the tenant's mapping then pushes the finding's status to its linked
+// Jira issue. No-op when no mapping resolver is wired or the tenant has no Jira
+// integration. Called by the jira-sync asynq handler.
+func (s *SyncService) SyncFindingStatus(ctx context.Context, tenantID, findingID shared.ID) error {
+	if s.mappingResolver == nil {
+		return nil
+	}
+	mapping, err := s.mappingResolver.ResolveMapping(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, ErrNoTicketingIntegration) {
+			return nil // tenant has no Jira integration — nothing to sync
+		}
+		return err
+	}
+	return s.SyncFindingStatusToTicket(ctx, tenantID, findingID, mapping)
 }
 
 // resolveClient returns the Jira client to use for a tenant. A statically

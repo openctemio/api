@@ -118,6 +118,26 @@ func (r *IntegrationClientResolver) Resolve(ctx context.Context, tenantID shared
 	return nil, appjira.ErrNoTicketingIntegration
 }
 
+// Compile-time check that the resolver also satisfies the mapping resolver.
+var _ appjira.MappingResolver = (*IntegrationClientResolver)(nil)
+
+// ResolveMapping loads the status/severity mapping for the tenant's first
+// connected Jira integration (overlaying config.ticketing onto the defaults).
+// Returns appjira.ErrNoTicketingIntegration when none is connected.
+func (r *IntegrationClientResolver) ResolveMapping(ctx context.Context, tenantID shared.ID) (appjira.MappingConfig, error) {
+	integrations, err := r.integrationRepo.ListByProvider(ctx, tenantID, integration.ProviderJira)
+	if err != nil {
+		return appjira.MappingConfig{}, fmt.Errorf("list jira integrations: %w", err)
+	}
+	for _, intg := range integrations {
+		if intg.Status() != integration.StatusConnected {
+			continue
+		}
+		return appjira.ParseMappingConfig(intg.Config()), nil
+	}
+	return appjira.MappingConfig{}, appjira.ErrNoTicketingIntegration
+}
+
 // buildClient assembles a Jira client from an integration's base URL and
 // decrypted credentials.
 func (r *IntegrationClientResolver) buildClient(intg *integration.Integration) (appjira.Client, error) {
