@@ -73,8 +73,21 @@ func ticketDescription(f *vulnerability.Finding) string {
 // Client defines the interface for Jira REST API operations.
 type Client interface {
 	CreateIssue(ctx context.Context, input CreateIssueInput) (*CreateIssueResult, error)
+	// GetIssueStatus returns the issue's current status name (echo-guard).
+	GetIssueStatus(ctx context.Context, issueKey string) (string, error)
+	// TransitionToStatus moves the issue to a target status NAME, attaching an
+	// optional comment. Returns ErrNoMatchingTransition when the workflow offers
+	// no transition to that status (caller falls back to AddComment).
+	TransitionToStatus(ctx context.Context, issueKey, targetStatus, comment string) error
+	// AddComment posts a comment on the issue.
+	AddComment(ctx context.Context, issueKey, body string) error
 	TestConnection(ctx context.Context) error
 }
+
+// ErrNoMatchingTransition mirrors the infra client's sentinel at the app layer
+// (the adapter maps the infra error to this one) so SyncService can fall back to
+// a comment without importing the infra package.
+var ErrNoMatchingTransition = errors.New("no jira transition to target status")
 
 // ClientResolver builds a Jira Client for a given tenant from that tenant's
 // configured ticketing integration (base URL + decrypted credentials). It is
@@ -185,6 +198,83 @@ type CreateTicketInput struct {
 	FindingID  string `json:"finding_id"`
 	ProjectKey string `json:"project_key"` // e.g. "SEC"
 	IssueType  string `json:"issue_type"`  // e.g. "Bug"
+}
+
+// jiraBrowseKeyRe extracts a Jira issue key from a browse URL,
+// e.g. "https://org.atlassian.net/browse/SEC-123" → "SEC-123".
+var jiraBrowseKeyRe = regexp.MustCompile(`/browse/([A-Z][A-Z0-9_]+-\d+)`)
+
+// firstJiraIssueKey returns the first Jira issue key found among a finding's
+// work-item URIs, or "" if none is a Jira browse URL.
+func firstJiraIssueKey(uris []string) string {
+	for _, u := range uris {
+		if m := jiraBrowseKeyRe.FindStringSubmatch(u); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// SyncFindingStatusToTicket pushes a finding's status to its linked Jira issue
+// (the outbound half of bidirectional sync — RFC-006 Phase 3). It is a no-op
+// unless the integration opted in (mapping.SyncEnabled) and the finding status
+// maps to a target Jira status. Echo-safe: it only acts on the OpenCTEM-initiated
+// status-change path (the inbound webhook updates findings directly, bypassing
+// this), and additionally skips when the issue is already at the target.
+//
+// On a workflow with no transition to the target, it falls back to a comment so
+// the change is visible to a human rather than failing.
+func (s *SyncService) SyncFindingStatusToTicket(ctx context.Context, tenantID, findingID shared.ID, mapping MappingConfig) error {
+	if !mapping.SyncEnabled {
+		return nil // outbound sync is opt-in per integration (default off)
+	}
+
+	finding, err := s.findingRepo.GetByID(ctx, tenantID, findingID)
+	if err != nil {
+		return fmt.Errorf("get finding: %w", err)
+	}
+
+	target, ok := mapping.JiraStatusForFinding(string(finding.Status()))
+	if !ok {
+		return nil // this finding status intentionally does not move the ticket
+	}
+
+	issueKey := firstJiraIssueKey(finding.WorkItemURIs())
+	if issueKey == "" {
+		return nil // finding isn't linked to a Jira issue
+	}
+
+	client, err := s.resolveClient(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+
+	// Echo-guard / idempotency: if Jira is already at the target, do nothing.
+	if cur, err := client.GetIssueStatus(ctx, issueKey); err == nil && strings.EqualFold(cur, target) {
+		return nil
+	}
+
+	comment := fmt.Sprintf("OpenCTEM set this finding to %q.", finding.Status())
+	if err := client.TransitionToStatus(ctx, issueKey, target, comment); err != nil {
+		if errors.Is(err, ErrNoMatchingTransition) {
+			// Workflow can't reach the target from its current status — leave a
+			// note instead of failing so a human can move the card.
+			body := fmt.Sprintf("OpenCTEM marked this finding %q, but no Jira transition to %q is available from its current status — please move it manually.",
+				finding.Status(), target)
+			if cErr := client.AddComment(ctx, issueKey, body); cErr != nil {
+				return fmt.Errorf("comment fallback after no transition: %w", cErr)
+			}
+			s.logger.Info("jira outbound: no transition to target, commented instead",
+				"finding_id", findingID.String(), "issue_key", issueKey, "target", target)
+			return nil
+		}
+		return fmt.Errorf("transition jira issue: %w", err)
+	}
+
+	s.logger.Info("jira outbound: synced finding status to ticket",
+		"finding_id", findingID.String(), "issue_key", issueKey,
+		"finding_status", finding.Status(), "jira_status", target)
+	return nil
 }
 
 // CreateTicketFromFinding auto-creates a Jira ticket from a finding and links it.

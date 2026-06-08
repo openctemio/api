@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -35,6 +36,24 @@ func (a clientAdapter) CreateIssue(ctx context.Context, in appjira.CreateIssueIn
 		Key:       res.Key,
 		BrowseURL: res.BrowseURL,
 	}, nil
+}
+
+func (a clientAdapter) GetIssueStatus(ctx context.Context, issueKey string) (string, error) {
+	return a.c.GetIssueStatus(ctx, issueKey)
+}
+
+func (a clientAdapter) TransitionToStatus(ctx context.Context, issueKey, targetStatus, comment string) error {
+	err := a.c.TransitionToStatus(ctx, issueKey, targetStatus, comment)
+	// Map the infra sentinel to the app-layer one so the caller can fall back
+	// to a comment without importing this package.
+	if errors.Is(err, ErrNoMatchingTransition) {
+		return appjira.ErrNoMatchingTransition
+	}
+	return err
+}
+
+func (a clientAdapter) AddComment(ctx context.Context, issueKey, body string) error {
+	return a.c.AddComment(ctx, issueKey, body)
 }
 
 func (a clientAdapter) TestConnection(ctx context.Context) error {
