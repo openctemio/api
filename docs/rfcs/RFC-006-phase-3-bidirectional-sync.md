@@ -124,6 +124,44 @@ Two independent, layered defenses — either alone breaks the loop; together the
 
 `ParseMappingConfig` (exists) gains `status_outbound` (case-insensitive; unknown OpenCTEM statuses ignored → no push). Defaults preserve today's inbound behavior; **outbound defaults to disabled** (`sync_enabled:false`) so no tenant gets surprise Jira writes until they opt in.
 
+#### 3.6.1 The status model — full evaluation (is it sufficient / best?)
+
+OpenCTEM has **14 finding statuses** vs Jira's 3 stock workflow statuses, so the map is **inherently lossy** and must respect the domain's transition rules. The canonical scanner lifecycle:
+
+```
+new → confirmed → in_progress → fix_applied → resolved
+                                     ↑              ↑
+                              dev marks fix    scanner/security verify
+terminal (reopen→confirmed): false_positive · accepted · duplicate
+pentest lane (separate): draft · in_review · remediation · retest · verified · accepted_risk
+```
+
+**Three domain rules constrain the map (these are correctness, not omissions):**
+1. `false_positive` / `accepted` / `accepted_risk` → **`RequiresApproval()`**. A webhook has no approving actor, so inbound **must not** auto-apply them (the domain rejects it anyway). Jira "Won't Do"/"Rejected" therefore does **not** silently close a finding — the sync **comments** (3c) and a human approves in OpenCTEM. *Outbound* may still reflect an OpenCTEM-side FP/accept to Jira.
+2. `resolved` → **`RequiresVerifyPermission()`**. A webhook can't grant it, so **every** Jira done-like status (`done/resolved/closed/completed/fixed/verified`) maps inbound to **`fix_applied`**, and the post-fix **rescan hook** verifies → promotes to `resolved`. This is why "Done" ≠ "resolved".
+3. **No skips in the graph** (e.g. `confirmed → fix_applied` is invalid). A Jira "Done" on a still-`confirmed` finding can't reach `fix_applied` in one hop → the domain rejects it; the sync **comments** rather than failing. Reconciling this fully (auto-walk intermediate states) is a candidate follow-up.
+
+**Inbound default map (corrected & completed):**
+
+| Jira status (lower-cased) | → finding status | note |
+|---|---|---|
+| open · to do · backlog · selected · reopened | `confirmed` | `open` is Jira's *initial* status — fixed from the old (wrong) `in_progress` |
+| in progress · in review · in development · reviewing | `in_progress` | |
+| done · resolved · closed · completed · fixed · verified | `fix_applied` | never `resolved` (rule 2) |
+| duplicate | `duplicate` | webhook-settable (no approval) |
+| *(won't do / rejected / accepted)* | *(unmapped)* | rule 1 → comment, human approves |
+
+**Outbound default map (new; stock-Jira names):**
+
+| finding status | → Jira status | finding status | → Jira status |
+|---|---|---|---|
+| new · confirmed | `To Do` | fix_applied · resolved · verified | `Done` |
+| in_progress · remediation · retest | `In Progress` | false_positive · accepted · accepted_risk · draft · in_review · duplicate | *(unmapped → comment / customer config)* |
+
+**Round-trip stability** (a key correctness property): `resolved → Done →`(inbound)`→ fix_applied` would *downgrade* — but the graph forbids `resolved → fix_applied`, so the inbound move is rejected and the finding stays `resolved`; the echo-guard (§3.4) suppresses the echo first regardless. `fix_applied ↔ Done` is stable. Lossy folds (`fix_applied`+`resolved`+`verified` → one `Done`) are unavoidable given Jira's 3 statuses and are documented, not bugs.
+
+**Verdict:** the *defaults* are now sufficient and correct for stock Jira; the *richness gap* is covered by (a) per-integration `status_inbound`/`status_outbound` overrides, (b) comment-fallback for unmappable/blocked transitions, and (c) approval-gating that keeps webhooks from bypassing human sign-off. Customers with custom workflows (e.g. `In Dev / QA / Shipped / Won't Do`) configure their own names.
+
 ### 3.7 Conflict resolution
 
 - **Per-field, last-writer-wins by event time.** Status is the only synced field in this RFC. The `*_at` columns let the worker drop a stale push (if `last_inbound_at` is newer than the event that triggered the outbound, skip — Jira already moved).
