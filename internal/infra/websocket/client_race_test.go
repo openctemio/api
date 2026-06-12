@@ -1,11 +1,13 @@
 package websocket
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -76,5 +78,38 @@ func TestClient_SendMessageCloseRace_NoPanic(t *testing.T) {
 
 		// Idempotent double-close must also be safe.
 		c.Close()
+	}
+}
+
+// Regression: after Run exits (server shutdown), Broadcast / RegisterClient /
+// UnregisterClient used to send on channels nobody reads and block the caller
+// forever — stalling graceful shutdown. They must now return promptly.
+func TestHub_SendersDoNotHangAfterShutdown(t *testing.T) {
+	h := NewHub(logger.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ran := make(chan struct{})
+	go func() {
+		h.Run(ctx)
+		close(ran)
+	}()
+	cancel()
+	<-ran // hub fully stopped
+
+	doneCh := make(chan struct{})
+	go func() {
+		h.Broadcast("tenant:t1", NewMessage(MessageTypeEvent), "t1")
+		h.DeliverLocal(&BroadcastMessage{Channel: "tenant:t1"})
+		c := &Client{conn: newTestConn(t), send: make(chan []byte, 1), logger: logger.NewNop()}
+		h.RegisterClient(c)
+		h.UnregisterClient(c)
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+		// ok — no hang
+	case <-time.After(5 * time.Second):
+		t.Fatal("hub channel senders hung after shutdown")
 	}
 }
