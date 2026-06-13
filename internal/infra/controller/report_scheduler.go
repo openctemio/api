@@ -177,12 +177,15 @@ func (c *ReportScheduler) render(ctx context.Context, s *reportschedule.ReportSc
 	}
 
 	return report.GenerateSummaryHTML(report.SummaryInput{
-		TenantName:  name,
-		GeneratedAt: time.Now(),
-		Total:       stats.Total,
-		Open:        stats.OpenCount,
-		Resolved:    stats.ResolvedCount,
-		BySeverity:  bySev,
+		TenantName:   name,
+		GeneratedAt:  time.Now(),
+		Total:        stats.Total,
+		Open:         stats.OpenCount,
+		Resolved:     stats.ResolvedCount,
+		BySeverity:   bySev,
+		KevOpen:      stats.KevOpen,
+		EpssHighOpen: stats.EpssHighOpen,
+		SLABreached:  stats.SLABreached,
 	})
 }
 
