@@ -2407,6 +2407,26 @@ func (r *FindingRepository) ListByAssetID(ctx context.Context, tenantID, assetID
 
 // CountByAssetID returns the count of findings for an asset.
 // Security: Requires tenantID to prevent cross-tenant data access.
+// CountWindow returns, for the trailing `days` window, how many findings were
+// newly detected (created_at) and how many were resolved (resolved_at, status
+// resolved/verified) — the new-vs-resolved trend a digest reports. Tenant-scoped.
+func (r *FindingRepository) CountWindow(ctx context.Context, tenantID shared.ID, days int) (newCount, resolvedCount int64, err error) {
+	if days <= 0 {
+		days = 7
+	}
+	query := `
+		SELECT
+			COALESCE(SUM(CASE WHEN created_at >= NOW() - ($2::int || ' days')::interval THEN 1 ELSE 0 END), 0) AS new_count,
+			COALESCE(SUM(CASE WHEN resolved_at >= NOW() - ($2::int || ' days')::interval
+				AND status IN ('resolved','verified') THEN 1 ELSE 0 END), 0) AS resolved_count
+		FROM findings
+		WHERE tenant_id = $1`
+	if err = r.db.QueryRowContext(ctx, query, tenantID.String(), days).Scan(&newCount, &resolvedCount); err != nil {
+		return 0, 0, fmt.Errorf("failed to count finding window: %w", err)
+	}
+	return newCount, resolvedCount, nil
+}
+
 func (r *FindingRepository) CountByAssetID(ctx context.Context, tenantID, assetID shared.ID) (int64, error) {
 	// Security: Include tenant_id in WHERE clause
 	query := `SELECT COUNT(*) FROM findings WHERE asset_id = $1 AND tenant_id = $2`
