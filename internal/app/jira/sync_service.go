@@ -157,6 +157,19 @@ type SyncService struct {
 	// trigger to close the "Jira Done → auto rescan" feedback edge
 	// without a manual Verify button click.
 	postFixHook FixAppliedHook
+
+	// campaignSink receives inbound epic status changes so a linked remediation
+	// campaign can be completed (epic Done → campaign completed). nil → inbound
+	// campaign sync is inert.
+	campaignSink CampaignEpicSink
+}
+
+// CampaignEpicSink receives inbound Jira epic status changes so a linked
+// remediation campaign can react (e.g. epic Done → campaign completed).
+// Implemented by *exposure.RemediationCampaignService. Declared here so the
+// jira package needs no dependency on the remediation/exposure packages.
+type CampaignEpicSink interface {
+	HandleEpicStatusChange(ctx context.Context, tenantID shared.ID, issueKey, jiraStatus string) error
 }
 
 // FixAppliedHook is called when a Jira webhook transitions a finding
@@ -182,6 +195,12 @@ func NewSyncService(findingRepo vulnerability.FindingRepository, jiraClient Clie
 // call after construction; nil value disables the hook.
 func (s *SyncService) SetPostFixAppliedHook(h FixAppliedHook) {
 	s.postFixHook = h
+}
+
+// SetCampaignSink wires the inbound epic→campaign sync. Safe to call after
+// construction; nil disables it.
+func (s *SyncService) SetCampaignSink(sink CampaignEpicSink) {
+	s.campaignSink = sink
 }
 
 // SetClientResolver wires the per-tenant Jira client resolver. Safe to call
@@ -605,6 +624,17 @@ func (s *SyncService) HandleJiraWebhook(ctx context.Context, tenantID shared.ID,
 	if newJiraStatus == "" {
 		// Webhook is for a non-status change (field update, comment, etc.) — ignore.
 		return nil
+	}
+
+	// Inbound campaign sync: if this issue is a campaign's linked epic, let the
+	// campaign react (epic Done → campaign completed). Best-effort and
+	// independent of the finding path below — an issue is either a finding
+	// ticket or a campaign epic, and each sink no-ops when the key isn't its own.
+	if s.campaignSink != nil {
+		if cerr := s.campaignSink.HandleEpicStatusChange(ctx, tenantID, payload.Issue.Key, newJiraStatus); cerr != nil {
+			s.logger.Warn("jira webhook: inbound campaign epic sync failed",
+				"issue_key", payload.Issue.Key, "jira_status", newJiraStatus, "error", cerr)
+		}
 	}
 
 	newFindingStatus, ok := mapJiraStatusToFinding(newJiraStatus)

@@ -96,9 +96,28 @@ linked epic is transitioned to **Done** (best-effort):
 Target status is `Done` (Jira's default done state); a per-tenant override is a
 follow-up.
 
+## Inbound status sync (epic → campaign)
+
+The reverse direction, mirroring finding-level inbound sync. A Jira webhook that
+moves a campaign's linked epic to a done state (`Done`/`Resolved`/`Closed`/
+`Complete`/`Completed`) marks the campaign **completed**.
+
+- `HandleJiraWebhook` calls `CampaignEpicSink.HandleEpicStatusChange` (best-
+  effort, independent of the finding path — an issue is either a finding ticket
+  or a campaign epic, and each sink no-ops on a key that isn't its own).
+- `RemediationCampaignService.HandleEpicStatusChange`: done-status guard →
+  `CampaignTicketRepository.GetByIssueKey` (reverse lookup) → load campaign →
+  `Complete()`. A draft/paused (non-completable) campaign is logged and skipped.
+- **Loop-safe**: it persists via `repo.Update` directly (not
+  `UpdateCampaignStatus`), so it does **not** re-fire the outbound transition;
+  and an already-terminal campaign is a clean no-op. So the
+  completion→epic-Done→webhook→inbound cycle converges immediately.
+
+Together with the outbound path, **campaign↔epic sync is now bidirectional** —
+matching the finding↔ticket sync.
+
 ## Planned follow-ups
 
-- **Inbound sync (epic → campaign)** — a Jira webhook moving the epic to Done
-  marks the campaign completed, mirroring the finding-level inbound path.
 - **Per-tenant epic done-status mapping** (instead of the fixed `Done`).
+- **Richer inbound mapping** (e.g. epic In Progress → campaign active).
 - **GitHub Issues** as a second provider via the same `CampaignEpicCreator` seam.

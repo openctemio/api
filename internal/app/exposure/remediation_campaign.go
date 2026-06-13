@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openctemio/api/pkg/domain/remediation"
@@ -269,6 +270,60 @@ func (s *RemediationCampaignService) syncEpicOnCompletion(ctx context.Context, t
 		s.logger.Warn("failed to sync campaign completion to epic",
 			"campaign_id", campaignID.String(), "issue_key", link.IssueKey(), "error", terr)
 	}
+}
+
+// HandleEpicStatusChange is the inbound half of campaign↔epic sync: when a
+// Jira webhook reports a campaign's linked epic moved to a done-ish status, the
+// campaign is marked completed. No-op when: ticketing is unwired, the status
+// isn't a done state, the issue isn't a campaign epic, or the campaign is
+// already terminal / not in a completable state. Idempotent and loop-safe — it
+// persists via repo.Update directly (not UpdateCampaignStatus), so it does NOT
+// re-trigger the outbound epic transition.
+func (s *RemediationCampaignService) HandleEpicStatusChange(ctx context.Context, tenantID shared.ID, issueKey, jiraStatus string) error {
+	if s.ticketRepo == nil || !isJiraDoneStatus(jiraStatus) {
+		return nil
+	}
+
+	link, err := s.ticketRepo.GetByIssueKey(ctx, tenantID, "jira", issueKey)
+	if err != nil {
+		if errors.Is(err, remediation.ErrCampaignTicketNotFound) {
+			return nil // not a campaign epic — nothing to do
+		}
+		return fmt.Errorf("lookup campaign by issue key: %w", err)
+	}
+
+	campaign, err := s.repo.GetByID(ctx, tenantID, link.CampaignID())
+	if err != nil {
+		return fmt.Errorf("load campaign for inbound epic sync: %w", err)
+	}
+	if campaign.Status() == remediation.CampaignStatusCompleted ||
+		campaign.Status() == remediation.CampaignStatusCanceled {
+		return nil // already terminal — echo-guard against the outbound loop
+	}
+
+	if cerr := campaign.Complete(); cerr != nil {
+		// Complete() requires active/validating; a draft/paused campaign can't be
+		// auto-completed from an epic move. Log and skip rather than force it.
+		s.logger.Warn("inbound epic done but campaign not completable",
+			"campaign_id", campaign.ID().String(), "status", campaign.Status(), "error", cerr)
+		return nil
+	}
+	s.recordRiskReduction(campaign)
+	if uerr := s.repo.Update(ctx, campaign); uerr != nil {
+		return fmt.Errorf("persist campaign completion from epic: %w", uerr)
+	}
+	s.logger.Info("remediation campaign completed from inbound jira epic",
+		"campaign_id", campaign.ID().String(), "issue_key", issueKey, "jira_status", jiraStatus)
+	return nil
+}
+
+// isJiraDoneStatus reports whether a Jira status name represents a done state.
+func isJiraDoneStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "done", "resolved", "closed", "complete", "completed":
+		return true
+	}
+	return false
 }
 
 // DeleteCampaign deletes a campaign.

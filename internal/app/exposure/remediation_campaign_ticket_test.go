@@ -44,6 +44,13 @@ func (r *fakeTicketRepo) Create(_ context.Context, t *remediation.CampaignTicket
 	return nil
 }
 
+func (r *fakeTicketRepo) GetByIssueKey(_ context.Context, _ shared.ID, _, _ string) (*remediation.CampaignTicket, error) {
+	if r.existing != nil {
+		return r.existing, nil
+	}
+	return nil, remediation.ErrCampaignTicketNotFound
+}
+
 type fakeEpicCreator struct {
 	key, url        string
 	calls           int
