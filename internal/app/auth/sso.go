@@ -406,7 +406,8 @@ func (s *SSOService) HandleCallback(ctx context.Context, input SSOCallbackInput)
 	// over TLS, so a missing id_token (provider configured without the
 	// "openid" scope) is not attacker-controllable — verify when present,
 	// skip otherwise to stay backward compatible with such configs.
-	if err := s.verifyIDToken(ctx, rp, tokens.IDToken, nonce); err != nil {
+	verifiedIssuer, verifiedSubject, err := s.verifyIDToken(ctx, rp, tokens.IDToken, nonce)
+	if err != nil {
 		s.logger.Warn("SSO id_token validation failed",
 			"provider", input.Provider, "source", rp.source, "error", err)
 		return nil, ErrSSOInvalidIDToken
@@ -419,6 +420,12 @@ func (s *SSOService) HandleCallback(ctx context.Context, input SSOCallbackInput)
 		s.logger.Error("SSO user info failed", "provider", input.Provider, "error", err)
 		return nil, ErrSSOUserInfoFailed
 	}
+
+	// Carry the verified id_token identity into account binding. These come
+	// from the signature-verified, JWKS-pinned id_token (not the userinfo
+	// body), so they are authoritative for distinguishing IdPs.
+	userInfo.Issuer = verifiedIssuer
+	userInfo.Subject = verifiedSubject
 
 	// SECURITY: Require email from SSO provider
 	if userInfo.Email == "" {
@@ -480,15 +487,18 @@ func (s *SSOService) HandleCallback(ctx context.Context, input SSOCallbackInput)
 // It is a no-op (returns nil) when the provider publishes no JWKS or the token
 // response carried no id_token — see the call site for why a missing id_token
 // is safe to skip. When an id_token IS present, every check is enforced.
-func (s *SSOService) verifyIDToken(ctx context.Context, rp *resolvedProvider, idToken, nonce string) error {
+// Returns the verified (issuer, subject) from the id_token so the caller can
+// bind the account to the IdP identity. Both are empty when there is no
+// id_token to verify (provider without JWKS, or configured without "openid").
+func (s *SSOService) verifyIDToken(ctx context.Context, rp *resolvedProvider, idToken, nonce string) (issuer, subject string, err error) {
 	jwksURL := rp.provider.JWKSURL(rp.tenantIdentifier)
 	if jwksURL == "" {
-		return nil // provider has no id_token to verify
+		return "", "", nil // provider has no id_token to verify
 	}
 	if strings.TrimSpace(idToken) == "" {
 		s.logger.Debug("SSO provider returned no id_token; skipping id_token validation",
 			"provider", rp.provider, "source", rp.source)
-		return nil
+		return "", "", nil
 	}
 
 	exp := idTokenExpectations{
@@ -500,10 +510,11 @@ func (s *SSOService) verifyIDToken(ctx context.Context, rp *resolvedProvider, id
 		exp.validateIssuer = entraIssuerValidator(rp.tenantIdentifier)
 	}
 
-	if _, err := s.oidcVerifier.verify(ctx, idToken, exp); err != nil {
-		return err
+	claims, err := s.oidcVerifier.verify(ctx, idToken, exp)
+	if err != nil {
+		return "", "", err
 	}
-	return nil
+	return claims.Issuer, claims.Subject, nil
 }
 
 // generateState generates a signed state token containing org slug, provider, and nonce.
@@ -643,6 +654,12 @@ type SSOUserInfo struct {
 	Email     string
 	Name      string
 	AvatarURL string
+
+	// Issuer + Subject are the verified id_token's federated identity (OIDC
+	// iss/sub), used to bind the account to the IdP that owns it. Empty when
+	// the provider returned no id_token to verify — binding is then skipped.
+	Issuer  string
+	Subject string
 }
 
 // getUserInfo fetches user information from the SSO provider.
@@ -783,6 +800,33 @@ func (s *SSOService) findOrCreateUser(ctx context.Context, userInfo *SSOUserInfo
 			}
 		}
 
+		// SECURITY: bind the account to the IdP that owns it. The provider enum
+		// is coarse — every Okta org AND every generic OIDC IdP collapses to
+		// AuthProviderOIDC — so the provider-match check above cannot tell
+		// "corp's Okta" from "an attacker's own Okta". The verified id_token
+		// issuer can. A different IdP asserting the same verified email (even
+		// one that also maps to 'oidc') must NOT adopt the account.
+		if userInfo.Issuer != "" {
+			if bound := existingUser.FederatedIssuer(); bound != nil && *bound != "" {
+				if *bound != userInfo.Issuer {
+					s.logger.Warn("SSO login blocked: email bound to a different identity provider",
+						"email", userInfo.Email,
+						"bound_issuer", *bound,
+						"login_issuer", userInfo.Issuer,
+					)
+					return nil, fmt.Errorf("%w: this email is registered with a different identity provider", ErrSSODomainNotAllowed)
+				}
+			} else {
+				// No issuer recorded yet — account created before binding was
+				// tracked, or a claimable local account being claimed via SSO
+				// for the first time. Bind now (trust-on-first-use) so every
+				// subsequent login is enforced against this issuer.
+				existingUser.BindFederatedIdentity(userInfo.Issuer, userInfo.Subject)
+				s.logger.Info("bound federated identity to existing account",
+					"email", userInfo.Email, "issuer", userInfo.Issuer)
+			}
+		}
+
 		existingUser.UpdateLastLogin()
 		if updateErr := s.userRepo.Update(ctx, existingUser); updateErr != nil {
 			s.logger.Warn("failed to update last login", "error", updateErr)
@@ -798,6 +842,8 @@ func (s *SSOService) findOrCreateUser(ctx context.Context, userInfo *SSOUserInfo
 	if err != nil {
 		return nil, err
 	}
+	// Record the IdP identity on first federation (no-op if no id_token issuer).
+	newUser.BindFederatedIdentity(userInfo.Issuer, userInfo.Subject)
 
 	if err := s.userRepo.Create(ctx, newUser); err != nil {
 		// Handle race condition: another concurrent request may have created
