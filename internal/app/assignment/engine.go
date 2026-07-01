@@ -23,7 +23,7 @@ type Result struct {
 // AssetTypeResolver returns the asset type (e.g. "domain", "repository") for a
 // finding's asset, so rules scoped by AssetTypes can be evaluated. Optional —
 // when unset, rules with an AssetTypes condition cannot match (previous
-// behaviour); wiring it makes those rules work.
+// behavior); wiring it makes those rules work.
 type AssetTypeResolver func(ctx context.Context, tenantID, assetID shared.ID) (string, error)
 
 // Engine evaluates assignment rules against findings
