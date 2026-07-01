@@ -838,7 +838,10 @@ func (s *SSOService) findOrCreateUser(ctx context.Context, userInfo *SSOUserInfo
 	authProvider := s.mapAuthProvider(provider)
 
 	// Create new user
-	newUser, err := userdom.NewOAuthUser(userInfo.Email, userInfo.Name, userInfo.AvatarURL, authProvider)
+	// NewFederatedUser (not NewOAuthUser) so Okta / generic-OIDC providers —
+	// which mapAuthProvider maps to AuthProviderOIDC — can actually create an
+	// account; NewOAuthUser rejects OIDC and broke first-login for those IdPs.
+	newUser, err := userdom.NewFederatedUser(userInfo.Email, userInfo.Name, userInfo.AvatarURL, authProvider)
 	if err != nil {
 		return nil, err
 	}

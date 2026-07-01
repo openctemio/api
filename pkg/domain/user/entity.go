@@ -72,6 +72,12 @@ func (p AuthProvider) IsOAuth() bool {
 	return false
 }
 
+// IsFederated returns true for any external identity provider — the named
+// OAuth providers (IsOAuth) plus generic OIDC/Okta. Broader than IsOAuth.
+func (p AuthProvider) IsFederated() bool {
+	return p.IsOAuth() || p == AuthProviderOIDC
+}
+
 // String returns the string representation of the auth provider.
 func (p AuthProvider) String() string {
 	return string(p)
@@ -228,6 +234,36 @@ func NewOAuthUser(email, name, avatarURL string, provider AuthProvider) (*User, 
 		updatedAt:     now,
 		authProvider:  provider,
 		emailVerified: true, // OAuth providers verify email
+	}, nil
+}
+
+// NewFederatedUser creates a user authenticated by any external identity
+// provider — the OAuth social providers OR generic OIDC/Okta. NewOAuthUser
+// rejects AuthProviderOIDC (its IsOAuth check excludes it), which made the SSO
+// account-creation path fail for Okta and generic-OIDC IdPs (mapAuthProvider
+// maps both to AuthProviderOIDC). The SSO create path must use this instead.
+func NewFederatedUser(email, name, avatarURL string, provider AuthProvider) (*User, error) {
+	if email == "" {
+		return nil, fmt.Errorf("%w: email is required", shared.ErrValidation)
+	}
+	if !provider.IsFederated() {
+		return nil, fmt.Errorf("%w: invalid federated provider: %s", shared.ErrValidation, provider)
+	}
+
+	now := time.Now().UTC()
+	return &User{
+		id:            shared.NewID(),
+		keycloakID:    nil,
+		email:         email,
+		name:          name,
+		avatarURL:     avatarURL,
+		status:        StatusActive,
+		preferences:   Preferences{},
+		lastLoginAt:   &now,
+		createdAt:     now,
+		updatedAt:     now,
+		authProvider:  provider,
+		emailVerified: true, // the IdP verified the email
 	}, nil
 }
 

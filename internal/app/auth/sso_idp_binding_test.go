@@ -126,6 +126,28 @@ func TestSSOFindOrCreate_NoIssuerNoRegression(t *testing.T) {
 	}
 }
 
+// A brand-new Okta / generic-OIDC user must be creatable. mapAuthProvider maps
+// Okta to AuthProviderOIDC, which NewOAuthUser rejected — so first-login via
+// Okta used to fail. NewFederatedUser fixes it; the new user is OIDC + bound.
+func TestSSOFindOrCreate_NewOktaUserCreated(t *testing.T) {
+	s, repo := newSSOSvc(nil) // no existing user
+	got, err := s.findOrCreateUser(context.Background(),
+		&SSOUserInfo{Email: "newokta@corp.com", Name: "New Okta", Issuer: corpOkta, Subject: "okta-sub"},
+		identityproviderdom.ProviderOkta)
+	if err != nil {
+		t.Fatalf("Okta first-login should create the user, got %v", err)
+	}
+	if got == nil || repo.created == nil {
+		t.Fatal("expected a created OIDC user")
+	}
+	if repo.created.AuthProvider() != userdom.AuthProviderOIDC {
+		t.Fatalf("expected AuthProviderOIDC, got %s", repo.created.AuthProvider())
+	}
+	if iss := repo.created.FederatedIssuer(); iss == nil || *iss != corpOkta {
+		t.Fatalf("new Okta user must be bound to %q, got %v", corpOkta, iss)
+	}
+}
+
 // A brand-new federated user records the IdP issuer at creation. Entra
 // (→Microsoft) is used because NewOAuthUser accepts it.
 func TestSSOFindOrCreate_NewUserBindsIssuer(t *testing.T) {
