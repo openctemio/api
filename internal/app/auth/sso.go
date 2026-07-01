@@ -777,61 +777,7 @@ func (s *SSOService) findOrCreateUser(ctx context.Context, userInfo *SSOUserInfo
 	// Try to find existing user by email
 	existingUser, err := s.userRepo.GetByEmail(ctx, userInfo.Email)
 	if err == nil && existingUser != nil {
-		// SECURITY: an account is bound to the auth provider that created it.
-		// Users are matched by email, but a verified email at one IdP does NOT
-		// prove ownership of an account created at another. On a provider
-		// mismatch the ONLY safe adoption is a CLAIMABLE LOCAL account (invited,
-		// no password yet) signing in via its IdP for the first time. Block
-		// every other mismatch — a password-backed local account AND a different
-		// federated provider (e.g. account created via Google, login attempted
-		// via a different SSO) — otherwise it is a cross-IdP account takeover.
-		existingProvider := existingUser.AuthProvider()
-		expectedProvider := s.mapAuthProvider(provider)
-
-		if existingProvider != expectedProvider {
-			claimableLocal := existingProvider == userdom.AuthProviderLocal && existingUser.PasswordHash() == nil
-			if !claimableLocal {
-				s.logger.Warn("SSO login blocked: email registered with a different auth provider",
-					"email", userInfo.Email,
-					"existing_provider", existingProvider,
-					"sso_provider", expectedProvider,
-				)
-				return nil, fmt.Errorf("%w: this email is registered with a different login method", ErrSSODomainNotAllowed)
-			}
-		}
-
-		// SECURITY: bind the account to the IdP that owns it. The provider enum
-		// is coarse — every Okta org AND every generic OIDC IdP collapses to
-		// AuthProviderOIDC — so the provider-match check above cannot tell
-		// "corp's Okta" from "an attacker's own Okta". The verified id_token
-		// issuer can. A different IdP asserting the same verified email (even
-		// one that also maps to 'oidc') must NOT adopt the account.
-		if userInfo.Issuer != "" {
-			if bound := existingUser.FederatedIssuer(); bound != nil && *bound != "" {
-				if *bound != userInfo.Issuer {
-					s.logger.Warn("SSO login blocked: email bound to a different identity provider",
-						"email", userInfo.Email,
-						"bound_issuer", *bound,
-						"login_issuer", userInfo.Issuer,
-					)
-					return nil, fmt.Errorf("%w: this email is registered with a different identity provider", ErrSSODomainNotAllowed)
-				}
-			} else {
-				// No issuer recorded yet — account created before binding was
-				// tracked, or a claimable local account being claimed via SSO
-				// for the first time. Bind now (trust-on-first-use) so every
-				// subsequent login is enforced against this issuer.
-				existingUser.BindFederatedIdentity(userInfo.Issuer, userInfo.Subject)
-				s.logger.Info("bound federated identity to existing account",
-					"email", userInfo.Email, "issuer", userInfo.Issuer)
-			}
-		}
-
-		existingUser.UpdateLastLogin()
-		if updateErr := s.userRepo.Update(ctx, existingUser); updateErr != nil {
-			s.logger.Warn("failed to update last login", "error", updateErr)
-		}
-		return existingUser, nil
+		return s.adoptExistingUser(ctx, existingUser, userInfo, provider)
 	}
 
 	// Map identity provider to auth provider
@@ -854,14 +800,71 @@ func (s *SSOService) findOrCreateUser(ctx context.Context, userInfo *SSOUserInfo
 		// Retry the lookup if creation fails (likely unique constraint violation).
 		retryUser, retryErr := s.userRepo.GetByEmail(ctx, userInfo.Email)
 		if retryErr == nil && retryUser != nil {
+			// SECURITY: the concurrently-created (or previously-missed) account
+			// must pass the SAME adoption guard as the normal path — otherwise a
+			// login whose initial GetByEmail errored/missed could adopt a
+			// different-provider or password-backed local account here without
+			// any provider/issuer check (takeover via the race/error path).
 			s.logger.Debug("user created by concurrent request, using existing", "email", userInfo.Email)
-			return retryUser, nil
+			return s.adoptExistingUser(ctx, retryUser, userInfo, provider)
 		}
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 
 	s.logger.Info("created SSO user", "user_id", newUser.ID().String(), "email", userInfo.Email, "provider", provider)
 	return newUser, nil
+}
+
+// adoptExistingUser applies the account-takeover guard before returning an
+// existing account for a federated login, then records the login. It is the
+// SINGLE place adoption is authorized, so BOTH the normal lookup path and the
+// create-race retry path enforce the same checks:
+//
+//  1. Provider match — an account is bound to the auth provider that created
+//     it; the only safe cross-provider adoption is a claimable LOCAL account
+//     (invited, no password) being claimed via its IdP for the first time.
+//  2. IdP issuer binding — the provider enum is coarse (every Okta org and
+//     every generic OIDC IdP collapse to AuthProviderOIDC), so a recorded
+//     verified id_token issuer must match; a pre-tracking/claimable account is
+//     bound trust-on-first-use.
+func (s *SSOService) adoptExistingUser(ctx context.Context, existingUser *userdom.User, userInfo *SSOUserInfo, provider identityproviderdom.Provider) (*userdom.User, error) {
+	existingProvider := existingUser.AuthProvider()
+	expectedProvider := s.mapAuthProvider(provider)
+
+	if existingProvider != expectedProvider {
+		claimableLocal := existingProvider == userdom.AuthProviderLocal && existingUser.PasswordHash() == nil
+		if !claimableLocal {
+			s.logger.Warn("SSO login blocked: email registered with a different auth provider",
+				"email", userInfo.Email,
+				"existing_provider", existingProvider,
+				"sso_provider", expectedProvider,
+			)
+			return nil, fmt.Errorf("%w: this email is registered with a different login method", ErrSSODomainNotAllowed)
+		}
+	}
+
+	if userInfo.Issuer != "" {
+		if bound := existingUser.FederatedIssuer(); bound != nil && *bound != "" {
+			if *bound != userInfo.Issuer {
+				s.logger.Warn("SSO login blocked: email bound to a different identity provider",
+					"email", userInfo.Email,
+					"bound_issuer", *bound,
+					"login_issuer", userInfo.Issuer,
+				)
+				return nil, fmt.Errorf("%w: this email is registered with a different identity provider", ErrSSODomainNotAllowed)
+			}
+		} else {
+			existingUser.BindFederatedIdentity(userInfo.Issuer, userInfo.Subject)
+			s.logger.Info("bound federated identity to existing account",
+				"email", userInfo.Email, "issuer", userInfo.Issuer)
+		}
+	}
+
+	existingUser.UpdateLastLogin()
+	if updateErr := s.userRepo.Update(ctx, existingUser); updateErr != nil {
+		s.logger.Warn("failed to update last login", "error", updateErr)
+	}
+	return existingUser, nil
 }
 
 // mapAuthProvider maps identity provider to user auth provider.

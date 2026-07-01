@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	identityproviderdom "github.com/openctemio/api/pkg/domain/identityprovider"
@@ -123,6 +124,71 @@ func TestSSOFindOrCreate_NoIssuerNoRegression(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected the existing user back")
+	}
+}
+
+// raceUserRepo simulates the create-race / transient-lookup path: the first
+// GetByEmail misses, Create then fails (concurrent create / unique violation),
+// and the retry GetByEmail returns an existing account.
+type raceUserRepo struct {
+	userdom.Repository
+	calls   int
+	onRetry *userdom.User
+	updated *userdom.User
+}
+
+func (r *raceUserRepo) GetByEmail(_ context.Context, _ string) (*userdom.User, error) {
+	r.calls++
+	if r.calls == 1 {
+		return nil, nil // initial lookup misses → proceed to create
+	}
+	return r.onRetry, nil // retry after Create fails
+}
+func (r *raceUserRepo) Create(_ context.Context, _ *userdom.User) error {
+	return errTestCreateConflict
+}
+func (r *raceUserRepo) Update(_ context.Context, u *userdom.User) error { r.updated = u; return nil }
+
+var errTestCreateConflict = fmt.Errorf("duplicate key value violates unique constraint")
+
+// The create-race retry path must apply the SAME takeover guard as the normal
+// path: a password-backed LOCAL account revealed by the retry lookup must NOT
+// be silently adopted by a federated login.
+func TestSSOFindOrCreate_RetryPathBlocksPasswordLocalTakeover(t *testing.T) {
+	victim, _ := userdom.NewLocalUser(victimMail, "Victim", "hashed-password")
+	repo := &raceUserRepo{onRetry: victim}
+	s := &SSOService{userRepo: repo, logger: logger.NewNop()}
+
+	got, err := s.findOrCreateUser(context.Background(),
+		&SSOUserInfo{Email: victimMail, Issuer: evilOkta, Subject: "evil"},
+		identityproviderdom.ProviderOkta)
+	if err == nil {
+		t.Fatal("expected the retry path to block adoption of a password-backed local account")
+	}
+	if got != nil {
+		t.Fatalf("blocked login must not return a user, got %v", got)
+	}
+	if repo.updated != nil {
+		t.Fatal("blocked login must not persist a login/binding")
+	}
+}
+
+// The retry path still succeeds for a legitimate concurrent creation of the
+// same federated identity (same issuer).
+func TestSSOFindOrCreate_RetryPathAdoptsSameIssuer(t *testing.T) {
+	concurrent, _ := userdom.NewFromKeycloak("kc-1", victimMail, "Victim")
+	concurrent.BindFederatedIdentity(corpOkta, "corp-sub")
+	repo := &raceUserRepo{onRetry: concurrent}
+	s := &SSOService{userRepo: repo, logger: logger.NewNop()}
+
+	got, err := s.findOrCreateUser(context.Background(),
+		&SSOUserInfo{Email: victimMail, Issuer: corpOkta, Subject: "corp-sub"},
+		identityproviderdom.ProviderOkta)
+	if err != nil {
+		t.Fatalf("same-issuer concurrent creation should be adopted, got %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected the concurrently-created user back")
 	}
 }
 
