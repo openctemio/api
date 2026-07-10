@@ -25,7 +25,7 @@ func (f *fakeFindingReader) ListFindings(_ context.Context, in app.ListFindingsI
 	f.gotTenant = in.TenantID
 	return pagination.NewResult([]*vulnerability.Finding{}, 0, pagination.Pagination{Page: 1, PerPage: 25}), nil
 }
-func (f *fakeFindingReader) GetFinding(_ context.Context, _, _ string) (*vulnerability.Finding, error) {
+func (f *fakeFindingReader) GetFindingWithScope(_ context.Context, _, _, _ string, _ bool) (*vulnerability.Finding, error) {
 	return nil, nil
 }
 func (f *fakeFindingReader) GetFindingStats(_ context.Context, _ string) (*vulnerability.FindingStats, error) {
@@ -48,14 +48,30 @@ func newTestMCP(fr mcpFindingReader) *MCPHandler {
 	return NewMCPHandler(fr, nil, nil, nil, nil, nil, logger.NewNop())
 }
 
-// doRPC POSTs a JSON-RPC request with the given tenant in context (as APIKeyAuth
-// would set it) and returns the HTTP status + parsed response.
+// allReadScopes is the set of permissions a fully-scoped MCP key would carry.
+var allReadScopes = []string{"findings:read", "assets:read", "compliance:frameworks:read"}
+
+// doRPC POSTs with the given tenant + full read scopes in context (as APIKeyAuth
+// would set for a fully-scoped key). Use doRPCScoped to vary the scopes.
 func doRPC(t *testing.T, h *MCPHandler, tenant, body string) (int, rpcResp) {
+	return doRPCScoped(t, h, tenant, "user-1", allReadScopes, body)
+}
+
+// doRPCScoped seeds tenant + acting user + permission scopes exactly as
+// APIKeyAuth would, so tests can exercise scope enforcement.
+func doRPCScoped(t *testing.T, h *MCPHandler, tenant, user string, scopes []string, body string) (int, rpcResp) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", bytes.NewBufferString(body))
+	ctx := req.Context()
 	if tenant != "" {
-		req = req.WithContext(context.WithValue(req.Context(), middleware.TenantIDKey, tenant))
+		ctx = context.WithValue(ctx, middleware.TenantIDKey, tenant)
 	}
+	if user != "" {
+		ctx = context.WithValue(ctx, middleware.UserIDKey, user)
+	}
+	ctx = context.WithValue(ctx, middleware.PermissionsKey, scopes)
+	ctx = context.WithValue(ctx, middleware.IsAdminKey, false)
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	var resp rpcResp
@@ -153,6 +169,33 @@ func TestMCP_ToolCallScopedToContextTenant(t *testing.T) {
 	}
 	if fr.gotTenant != "tenant-GOOD" {
 		t.Fatalf("tool must use the context tenant, got %q", fr.gotTenant)
+	}
+}
+
+// A key WITHOUT the tool's required scope must be denied — scopes are enforced,
+// not decorative. This is the least-privilege guarantee.
+func TestMCP_ToolRequiresScope(t *testing.T) {
+	fr := &fakeFindingReader{}
+	h := newTestMCP(fr)
+
+	// Key carries only assets:read, but calls a findings tool.
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_findings","arguments":{}}}`
+	_, resp := doRPCScoped(t, h, "tenant-a", "user-1", []string{"assets:read"}, body)
+
+	var r struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(resp.Result, &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !r.IsError {
+		t.Fatal("expected a permission-denied error result")
+	}
+	if fr.gotTenant != "" {
+		t.Fatal("the tool must not run when the key lacks its scope")
 	}
 }
 

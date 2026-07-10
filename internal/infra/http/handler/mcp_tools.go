@@ -3,13 +3,25 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/openctemio/api/internal/app"
+	"github.com/openctemio/api/internal/infra/http/middleware"
 	assetdom "github.com/openctemio/api/pkg/domain/asset"
+	"github.com/openctemio/api/pkg/domain/permission"
 	"github.com/openctemio/api/pkg/domain/shared"
 	"github.com/openctemio/api/pkg/domain/vulnerability"
 )
+
+// toolInputError is a tool argument-validation error whose message is safe to
+// return to the client verbatim. Any other error is redacted by the dispatcher.
+type toolInputError struct{ msg string }
+
+func (e toolInputError) Error() string { return e.msg }
+
+// actingUser returns the API key's owning user (from context, set by
+// APIKeyAuth). Tools pass this with isAdmin=false so a key sees exactly the
+// data-scope of the user it was minted for — never an admin-wide view.
+func actingUser(ctx context.Context) string { return middleware.GetUserID(ctx) }
 
 // mcpDefaultLimit / mcpMaxLimit bound how many rows a list tool returns, so an
 // AI client can't pull an unbounded result set into its context.
@@ -87,20 +99,23 @@ func (h *MCPHandler) buildTools() []mcpTool {
 				`"source":{"type":"string"},` +
 				`"search":{"type":"string"},` +
 				`"limit":{"type":"integer","description":"max rows (default 25, max 100)"}}}`),
-			call: h.toolListFindings,
+			RequiredPerm: string(permission.FindingsRead),
+			call:         h.toolListFindings,
 		},
 		{
-			Name:        "get_finding",
-			Description: "Get a single finding by its ID, scoped to this tenant.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
-			call:        h.toolGetFinding,
+			Name:         "get_finding",
+			Description:  "Get a single finding by its ID, scoped to this tenant.",
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
+			RequiredPerm: string(permission.FindingsRead),
+			call:         h.toolGetFinding,
 		},
 		{
 			Name: "finding_stats",
 			Description: "Aggregate finding posture for this tenant: totals by severity and " +
 				"status plus risk rollups (open KEV findings, high-EPSS open findings, SLA-breached).",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-			call:        h.toolFindingStats,
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+			RequiredPerm: string(permission.FindingsRead),
+			call:         h.toolFindingStats,
 		},
 		{
 			Name: "list_active_cves",
@@ -111,28 +126,32 @@ func (h *MCPHandler) buildTools() []mcpTool {
 				`"min_epss":{"type":"number","description":"0..1 EPSS floor"},` +
 				`"severity":{"type":"string"},` +
 				`"limit":{"type":"integer"}}}`),
-			call: h.toolListActiveCVEs,
+			RequiredPerm: string(permission.FindingsRead),
+			call:         h.toolListActiveCVEs,
 		},
 		{
 			Name: "explain_finding_priority",
 			Description: "Explain why a finding has its priority (KEV / EPSS / reachability / " +
 				"severity weighting), scoped to this tenant. Read-only; does not reclassify.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
-			call:        h.toolExplainPriority,
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`),
+			RequiredPerm: string(permission.FindingsRead),
+			call:         h.toolExplainPriority,
 		},
 		{
 			Name: "get_exposure_chains",
 			Description: "Shortest attack-path hop-chains from public entry points to assets " +
 				"carrying open KEV/critical findings (crown jewels), for this tenant.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-			call:        h.toolExposureChains,
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+			RequiredPerm: string(permission.AssetsRead),
+			call:         h.toolExposureChains,
 		},
 		{
 			Name: "list_remediation_groups",
 			Description: "List remediation groups (solution families): each is the set of open " +
 				"findings one fix resolves, with finding/asset counts and severity breakdown.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-			call:        h.toolListRemediationGroups,
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+			RequiredPerm: string(permission.FindingsRead),
+			call:         h.toolListRemediationGroups,
 		},
 		{
 			Name: "list_assets",
@@ -143,13 +162,15 @@ func (h *MCPHandler) buildTools() []mcpTool {
 				`"criticality":{"type":"string"},` +
 				`"search":{"type":"string"},` +
 				`"limit":{"type":"integer"}}}`),
-			call: h.toolListAssets,
+			RequiredPerm: string(permission.AssetsRead),
+			call:         h.toolListAssets,
 		},
 		{
-			Name:        "compliance_posture",
-			Description: "Compliance posture rollup for this tenant: framework/control totals and overdue controls.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
-			call:        h.toolCompliancePosture,
+			Name:         "compliance_posture",
+			Description:  "Compliance posture rollup for this tenant: framework/control totals and overdue controls.",
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{}}`),
+			RequiredPerm: string(permission.ComplianceFrameworksRead),
+			call:         h.toolCompliancePosture,
 		},
 	}
 }
@@ -169,11 +190,12 @@ func (h *MCPHandler) toolListFindings(ctx context.Context, tenantID string, raw 
 	_ = json.Unmarshal(raw, &a)
 
 	in := app.ListFindingsInput{
-		TenantID: tenantID,
-		IsAdmin:  true, // a tenant-scoped key sees the whole tenant, not a user's data-scope
-		Search:   a.Search,
-		PerPage:  clampLimit(a.Limit),
-		Page:     1,
+		TenantID:     tenantID,
+		ActingUserID: actingUser(ctx), // confine to the key owner's data-scope
+		IsAdmin:      false,           // API keys never get admin bypass
+		Search:       a.Search,
+		PerPage:      clampLimit(a.Limit),
+		Page:         1,
 	}
 	if a.Severity != "" {
 		in.Severities = []string{a.Severity}
@@ -203,9 +225,10 @@ type idArg struct {
 func (h *MCPHandler) toolGetFinding(ctx context.Context, tenantID string, raw json.RawMessage) (any, error) {
 	var a idArg
 	if err := json.Unmarshal(raw, &a); err != nil || a.ID == "" {
-		return nil, fmt.Errorf("id is required")
+		return nil, toolInputError{"id is required"}
 	}
-	f, err := h.findings.GetFinding(ctx, tenantID, a.ID)
+	// Scoped read: the key owner's data-scope + pentest membership apply.
+	f, err := h.findings.GetFindingWithScope(ctx, tenantID, a.ID, actingUser(ctx), false)
 	if err != nil {
 		return nil, err
 	}
@@ -268,15 +291,15 @@ func (h *MCPHandler) toolListActiveCVEs(ctx context.Context, tenantID string, ra
 func (h *MCPHandler) toolExplainPriority(ctx context.Context, tenantID string, raw json.RawMessage) (any, error) {
 	var a idArg
 	if err := json.Unmarshal(raw, &a); err != nil || a.ID == "" {
-		return nil, fmt.Errorf("id is required")
+		return nil, toolInputError{"id is required"}
 	}
 	tid, err := shared.IDFromString(tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid tenant")
+		return nil, toolInputError{"invalid tenant"}
 	}
 	fid, err := shared.IDFromString(a.ID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid finding id")
+		return nil, toolInputError{"invalid finding id"}
 	}
 	return h.priority.ExplainFinding(ctx, tid, fid)
 }
@@ -284,7 +307,7 @@ func (h *MCPHandler) toolExplainPriority(ctx context.Context, tenantID string, r
 func (h *MCPHandler) toolExposureChains(ctx context.Context, tenantID string, _ json.RawMessage) (any, error) {
 	tid, err := shared.IDFromString(tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid tenant")
+		return nil, toolInputError{"invalid tenant"}
 	}
 	return h.surface.GetExposureChains(ctx, tid)
 }
@@ -292,7 +315,7 @@ func (h *MCPHandler) toolExposureChains(ctx context.Context, tenantID string, _ 
 func (h *MCPHandler) toolListRemediationGroups(ctx context.Context, tenantID string, _ json.RawMessage) (any, error) {
 	tid, err := shared.IDFromString(tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid tenant")
+		return nil, toolInputError{"invalid tenant"}
 	}
 	groups, err := h.groups.ListGroups(ctx, tid)
 	if err != nil {
@@ -313,11 +336,12 @@ func (h *MCPHandler) toolListAssets(ctx context.Context, tenantID string, raw js
 	_ = json.Unmarshal(raw, &a)
 
 	in := app.ListAssetsInput{
-		TenantID: tenantID,
-		IsAdmin:  true,
-		Search:   a.Search,
-		Page:     1,
-		PerPage:  clampLimit(a.Limit),
+		TenantID:     tenantID,
+		ActingUserID: actingUser(ctx), // confine to the key owner's data-scope
+		IsAdmin:      false,           // API keys never get admin bypass
+		Search:       a.Search,
+		Page:         1,
+		PerPage:      clampLimit(a.Limit),
 	}
 	if a.Exposure != "" {
 		in.Exposures = []string{a.Exposure}

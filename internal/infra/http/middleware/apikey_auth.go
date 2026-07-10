@@ -71,7 +71,7 @@ func extractAPIKeyToken(r *http.Request) string {
 			}
 		}
 	}
-	if k := r.Header.Get("X-API-Key"); strings.HasPrefix(k, "oct_") {
+	if k := strings.TrimSpace(r.Header.Get("X-API-Key")); strings.HasPrefix(k, "oct_") {
 		return k
 	}
 	return ""

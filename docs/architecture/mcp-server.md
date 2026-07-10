@@ -48,13 +48,22 @@ plaintext `oct_…` once).
 | `list_assets` | `AssetService.ListAssets` | assets (exposure/criticality/search) |
 | `compliance_posture` | `ComplianceService.GetComplianceStats` | framework/control posture |
 
-## Tenant isolation (the key invariant)
+## Security model (the key invariants)
 
-The tenant is taken **solely** from the authenticated key's context and injected
-into every tool call. Tools expose **no tenant argument**, so a caller cannot
-widen scope by smuggling a `tenant_id` — a regression test asserts this. Every
-backing service already takes `tenantID` explicitly and enforces
-`WHERE tenant_id = ?`. List tools clamp result size (default 25, max 100).
+- **Tenant isolation**: the tenant is taken **solely** from the authenticated
+  key's context and injected into every tool call. Tools expose **no tenant
+  argument**, so a caller cannot widen scope by smuggling a `tenant_id` — a
+  regression test asserts this. Every backing service takes `tenantID` explicitly
+  and enforces `WHERE tenant_id = ?`.
+- **Least privilege**: each tool requires a permission (`findings:read`,
+  `assets:read`, `compliance:frameworks:read`) matched against the key's scopes;
+  tools run with the key owner's data-scope (`IsAdmin=false`), so group scoping and
+  the pentest-membership gate still apply. Mint an MCP key with the read scopes it
+  needs — a scopeless key can call nothing.
+- **Offboarding**: a user-scoped key stops authenticating the moment its owner's
+  membership is suspended or removed.
+- **Rate limit**: a per-IP limiter runs before auth. List tools clamp to ≤100 rows.
+- **Errors**: internal errors are redacted; only input-validation messages surface.
 
 ## Connecting a client
 

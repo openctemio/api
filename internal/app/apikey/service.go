@@ -18,6 +18,14 @@ import (
 // keyPrefix is the required prefix of every OpenCTEM API key.
 const keyPrefix = "oct_"
 
+// errString renders an error for structured logging, tolerating nil.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // Service provides business logic for API key management. pepper is
 // the server-side secret mixed into every new key's stored hash via
 // HMAC-SHA256 (pkg/crypto.HashTokenPeppered). Empty pepper falls
@@ -26,9 +34,18 @@ const keyPrefix = "oct_"
 // brute-force against the leaked key_hash column (hashcat / rainbow
 // tables without the HMAC key cannot recover the raw key).
 type Service struct {
-	repo   apikeydom.Repository
-	pepper string
-	logger *logger.Logger
+	repo       apikeydom.Repository
+	pepper     string
+	membership MembershipChecker // nil → no member-lifecycle gate (tests only)
+	logger     *logger.Logger
+}
+
+// MembershipChecker reports whether a user still has an ACTIVE membership in a
+// tenant. Injected so a suspended or removed member's `oct_` key stops
+// authenticating immediately — the key's own status can't reflect
+// member-lifecycle changes, so without this a removed member keeps API access.
+type MembershipChecker interface {
+	IsActiveMember(ctx context.Context, tenantID, userID shared.ID) (bool, error)
 }
 
 // NewService creates a new Service. pepper should be APP_ENCRYPTION_KEY
@@ -40,6 +57,11 @@ func NewService(repo apikeydom.Repository, pepper string, log *logger.Logger) *S
 		logger: log.With("service", "apikey"),
 	}
 }
+
+// SetMembershipChecker wires the membership gate used by Authenticate for
+// user-scoped keys. When unset, key validity is decoupled from member lifecycle
+// (acceptable only in tests) — always wire it in production.
+func (s *Service) SetMembershipChecker(m MembershipChecker) { s.membership = m }
 
 // CreateInput represents input for creating an API key.
 type CreateInput struct {
@@ -164,6 +186,19 @@ func (s *Service) Authenticate(ctx context.Context, rawKey, ip string) (*apikeyd
 	// IsActive covers both status (revoked/expired) and expiry timestamp.
 	if !key.IsActive() {
 		return nil, apikeydom.ErrAPIKeyNotFound
+	}
+
+	// Member-lifecycle gate: a user-scoped key must belong to a still-active
+	// member. This makes member suspension/removal revoke the key immediately —
+	// otherwise a removed member keeps API access until the key's own expiry.
+	// Fail closed (reject) on a missing membership or any lookup error.
+	if uid := key.UserID(); uid != nil && s.membership != nil {
+		active, mErr := s.membership.IsActiveMember(ctx, key.TenantID(), *uid)
+		if mErr != nil || !active {
+			s.logger.Debug("api key rejected: member not active",
+				"key_id", key.ID().String(), "error", errString(mErr))
+			return nil, apikeydom.ErrAPIKeyNotFound
+		}
 	}
 
 	// Best-effort usage telemetry — a failure here must never fail auth.

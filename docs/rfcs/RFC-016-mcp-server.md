@@ -56,13 +56,23 @@ unfinished "F-9 follow-up". Phase 1 completes it.
   priority`, `get_exposure_chains`, `list_remediation_groups`, `list_assets`,
   `compliance_posture`.
 
-## Security properties
+## Security properties (hardened after an adversarial review)
 
-- Every tool is confined to the authenticated key's tenant; a tenant-isolation
-  test asserts a smuggled `tenant_id` argument is ignored.
-- List tools clamp result size (default 25, max 100) so an AI client can't pull an
-  unbounded set into context.
-- Errors returned to the client never echo attacker-controlled input.
+- **Tenant isolation**: every tool is confined to the authenticated key's tenant;
+  a test asserts a smuggled `tenant_id` argument is ignored.
+- **Least privilege**: each tool declares a required permission and is gated by the
+  same `HasPermission` check the REST routes use — a key can call a tool only if it
+  carries that scope. Tools run with the key owner's **data-scope** (`ActingUserID`,
+  `IsAdmin=false`), never an admin-wide view, so group data-scoping and the
+  pentest-membership gate still apply.
+- **Offboarding**: `Authenticate` gates a user-scoped key on an **active
+  membership** (`MembershipChecker`), so suspending/removing a member revokes their
+  key immediately — fail-closed on any lookup miss/error.
+- **DoS**: a per-IP rate limiter runs before auth; list tools clamp result size
+  (default 25, max 100); the global 10 MB body limit + concurrency limit apply.
+- **Info leak**: only safe input-validation messages are returned verbatim; any
+  internal/service error is redacted to "tool execution failed" and logged
+  server-side. Errors never echo attacker-controlled input.
 
 ## Follow-ons
 

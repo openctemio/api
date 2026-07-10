@@ -1801,6 +1801,60 @@ func TestAuthenticate_ExpiredKeyRejected(t *testing.T) {
 	}
 }
 
+type fakeMembership struct {
+	active bool
+	err    error
+	calls  int
+}
+
+func (f *fakeMembership) IsActiveMember(_ context.Context, _, _ shared.ID) (bool, error) {
+	f.calls++
+	return f.active, f.err
+}
+
+// A user-scoped key whose owner is no longer an active member must be rejected —
+// this is the offboarding kill switch (suspend/remove revokes the key at once).
+func TestAuthenticate_InactiveMemberRejected(t *testing.T) {
+	repo := newMockAPIKeyRepo()
+	svc := newTestAPIKeyService(repo)
+	mem := &fakeMembership{active: false}
+	svc.SetMembershipChecker(mem)
+	tenantID := shared.NewID()
+	userID := shared.NewID()
+
+	created, err := svc.Create(context.Background(), apikey.CreateInput{
+		TenantID: tenantID.String(), UserID: userID.String(), Name: "offboard-me",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.Authenticate(context.Background(), created.Plaintext, ""); !errors.Is(err, apikeydom.ErrAPIKeyNotFound) {
+		t.Fatalf("inactive member's key must be rejected, got %v", err)
+	}
+	if mem.calls != 1 {
+		t.Errorf("expected membership to be checked once, got %d", mem.calls)
+	}
+}
+
+// An active member's user-scoped key authenticates normally.
+func TestAuthenticate_ActiveMemberAllowed(t *testing.T) {
+	repo := newMockAPIKeyRepo()
+	svc := newTestAPIKeyService(repo)
+	svc.SetMembershipChecker(&fakeMembership{active: true})
+	tenantID := shared.NewID()
+	userID := shared.NewID()
+
+	created, err := svc.Create(context.Background(), apikey.CreateInput{
+		TenantID: tenantID.String(), UserID: userID.String(), Name: "active",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.Authenticate(context.Background(), created.Plaintext, ""); err != nil {
+		t.Fatalf("active member's key must authenticate, got %v", err)
+	}
+}
+
 // A touch failure must not fail authentication (best-effort telemetry).
 func TestAuthenticate_TouchFailureIsNonFatal(t *testing.T) {
 	repo := newMockAPIKeyRepo()

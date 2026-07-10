@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -56,7 +57,9 @@ type jsonrpcError struct {
 
 type mcpFindingReader interface {
 	ListFindings(ctx context.Context, in app.ListFindingsInput) (pagination.Result[*vulnerability.Finding], error)
-	GetFinding(ctx context.Context, tenantID, findingID string) (*vulnerability.Finding, error)
+	// GetFindingWithScope enforces the caller's data-scope + pentest membership
+	// (never the admin-bypass GetFinding).
+	GetFindingWithScope(ctx context.Context, tenantID, findingID, actingUserID string, isAdmin bool) (*vulnerability.Finding, error)
 	GetFindingStats(ctx context.Context, tenantID string) (*vulnerability.FindingStats, error)
 	ListActiveCVEs(ctx context.Context, in app.ListActiveCVEsInput) (pagination.Result[vulnerability.ActiveCVE], error)
 }
@@ -87,6 +90,10 @@ type mcpTool struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
+	// RequiredPerm is the permission (API-key scope) the caller must hold to run
+	// this tool. Enforced by handleToolsCall via the same HasPermission check the
+	// REST routes use — so an MCP key can do exactly what its scopes allow.
+	RequiredPerm string
 	// call runs the tool for a single tenant. args is the raw JSON `arguments`
 	// object; the return value is JSON-marshaled into the tool's text result.
 	call func(ctx context.Context, tenantID string, args json.RawMessage) (any, error)
@@ -220,12 +227,27 @@ func (h *MCPHandler) handleToolsCall(w http.ResponseWriter, ctx context.Context,
 		return
 	}
 
+	// Enforce the key's scope: an MCP key can call a tool only if it carries the
+	// tool's required permission — the same gate the equivalent REST route uses.
+	// API keys are never admin, so HasPermission consults only the key's scopes.
+	if tool.RequiredPerm != "" && !middleware.HasPermission(ctx, tool.RequiredPerm) {
+		h.writeResult(w, req.ID, toolResult("permission denied: this API key lacks the scope required for this tool ("+tool.RequiredPerm+")", true))
+		return
+	}
+
 	result, err := tool.call(ctx, tenantID, p.Arguments)
 	if err != nil {
 		// MCP convention: tool execution failures are a normal result with
-		// isError=true, not a JSON-RPC protocol error. Return a redacted message.
-		h.logger.Debug("mcp tool error", "tool", tool.Name, "error", err.Error())
-		h.writeResult(w, req.ID, toolResult("error: "+err.Error(), true))
+		// isError=true, not a JSON-RPC protocol error. Only safe input-validation
+		// messages are surfaced verbatim; any other (internal/service) error is
+		// redacted to avoid leaking DB/internal detail — logged in full server-side.
+		h.logger.Warn("mcp tool error", "tool", tool.Name, "error", err.Error())
+		var ie toolInputError
+		if errors.As(err, &ie) {
+			h.writeResult(w, req.ID, toolResult(ie.Error(), true))
+		} else {
+			h.writeResult(w, req.ID, toolResult("tool execution failed", true))
+		}
 		return
 	}
 	text, mErr := json.Marshal(result)
