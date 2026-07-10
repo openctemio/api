@@ -126,7 +126,8 @@ func (s *RemediationCampaignService) ResolveCampaignFindings(ctx context.Context
 			return 0, kerr
 		}
 		s.logger.Info("resolved remediation campaign findings by key",
-			"tenant", tenantID, "campaign_id", campaignID, "resolved", n, "status", in.Status)
+			"tenant", sanitizeLogValue(tenantID), "campaign_id", sanitizeLogValue(campaignID),
+			"resolved", n, "status", sanitizeLogValue(in.Status))
 		return n, nil
 	}
 
@@ -139,8 +140,27 @@ func (s *RemediationCampaignService) ResolveCampaignFindings(ctx context.Context
 		return 0, err
 	}
 	s.logger.Info("resolved remediation campaign findings",
-		"tenant", tenantID, "campaign_id", campaignID, "resolved", n, "status", in.Status)
+		"tenant", sanitizeLogValue(tenantID), "campaign_id", sanitizeLogValue(campaignID),
+		"resolved", n, "status", sanitizeLogValue(in.Status))
 	return n, nil
+}
+
+// sanitizeLogValue strips CR/LF and control characters from a
+// user-influenceable value before it is logged, preventing log forging
+// (CodeQL go/log-injection). Mirrors the remediation group service's helper —
+// the shared logger can emit plain text, where an unescaped newline would let a
+// caller forge log lines.
+func sanitizeLogValue(s string) string {
+	const maxLen = 128
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r < 0x20 {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // SetTicketing wires the campaign→Jira-epic integration. Safe to call after
