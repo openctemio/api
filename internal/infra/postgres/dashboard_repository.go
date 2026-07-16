@@ -725,6 +725,18 @@ func (r *DashboardRepository) GetFilteredAssetStats(ctx context.Context, tenantI
 		return stats, err
 	}
 
+	// Average risk score across the tenants' assets. Previously never populated,
+	// so the primary dashboard showed 0.0 for every tenant even though the
+	// /assets and attack-surface views (AssetRepository.GetAverageRiskScore)
+	// showed the correct number. Mirror that query for consistency.
+	//nolint:gosec // G202: placeholders is built from len(tenantIDs), not user input
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(AVG(risk_score), 0) FROM assets WHERE tenant_id IN (`+placeholders+`)`,
+		args...,
+	).Scan(&stats.AverageRiskScore); err != nil {
+		return stats, err
+	}
+
 	return stats, nil
 }
 
