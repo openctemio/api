@@ -97,7 +97,23 @@ func getRecommendationFromRemediation(r *vulnerability.FindingRemediation) strin
 
 // Create persists a new finding.
 func (r *FindingRepository) Create(ctx context.Context, finding *vulnerability.Finding) error {
-	metadata, err := json.Marshal(finding.Metadata())
+	// Merge sourceMetadata INTO metadata for persistence, mirroring Update().
+	// The pentest module stores its fields (steps_to_reproduce, poc_code,
+	// business_impact, owasp_category, mitre_technique_id, cvss_version, etc.)
+	// in sourceMetadata, but the DB has a single `metadata` JSONB column. Without
+	// this merge, all pentest source_metadata is silently dropped on create and
+	// only reappears after the first edit. No-op for scanner findings, which do
+	// not populate sourceMetadata.
+	mergedMeta := finding.Metadata()
+	if mergedMeta == nil {
+		mergedMeta = make(map[string]any)
+	}
+	if sm := finding.SourceMetadata(); sm != nil {
+		for k, v := range sm {
+			mergedMeta[k] = v
+		}
+	}
+	metadata, err := json.Marshal(mergedMeta)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
@@ -828,9 +844,9 @@ func (r *FindingRepository) GetByIDs(ctx context.Context, tenantID shared.ID, id
 func (r *FindingRepository) Update(ctx context.Context, finding *vulnerability.Finding) error {
 	// Merge sourceMetadata INTO metadata for persistence. The pentest module
 	// stores steps_to_reproduce, poc_code, business_impact, etc. in
-	// sourceMetadata, but the DB has a single `metadata` JSONB column.
-	// During Create, this merge happens in the service. During Update, we
-	// need to re-merge here to persist pentest field changes.
+	// sourceMetadata, but the DB has a single `metadata` JSONB column. Both
+	// Create() and Update() perform this same merge so pentest fields persist
+	// through the finding's whole lifecycle.
 	mergedMeta := finding.Metadata()
 	if mergedMeta == nil {
 		mergedMeta = make(map[string]any)
