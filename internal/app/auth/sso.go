@@ -72,6 +72,12 @@ type SSOService struct {
 
 	// For tenant membership creation
 	tenantMemberRepo TenantMemberCreator
+
+	// domainVerifier is the SSO P1 verified-domain gate. When wired, it is the
+	// PRIMARY JIT auto-provisioning gate (a DNS-proven domain). When nil, the
+	// flow falls back to the P0 config-AllowedDomains gate so nothing breaks
+	// pre-wiring. Fail-closed: an unverified/unknown domain never JIT-provisions.
+	domainVerifier DomainVerifier
 }
 
 // TenantMemberCreator creates tenant memberships for auto-provisioned users and
@@ -79,6 +85,14 @@ type SSOService struct {
 type TenantMemberCreator interface {
 	CreateMembership(ctx context.Context, m *tenantdom.Membership) error
 	GetMembership(ctx context.Context, userID, tenantID shared.ID) (*tenantdom.Membership, error)
+}
+
+// DomainVerifier answers whether an email domain is DNS-verified for a tenant.
+// It is the trust boundary that authorizes SSO JIT auto-provisioning: an IdP
+// proves WHO a user is, a DNS-proven domain proves the tenant may CLAIM that
+// domain's users.
+type DomainVerifier interface {
+	IsVerifiedDomain(ctx context.Context, tenantID, emailDomain string) (bool, error)
 }
 
 // NewSSOService creates a new SSOService.
@@ -124,6 +138,12 @@ func NewSSOService(
 // SetTenantMemberRepo sets the tenant membership creator for auto-provisioning.
 func (s *SSOService) SetTenantMemberRepo(repo TenantMemberCreator) {
 	s.tenantMemberRepo = repo
+}
+
+// SetDomainVerifier wires the verified-domain JIT gate (SSO P1). Nil-safe: when
+// left unset, ensureTenantMembership falls back to the P0 AllowedDomains gate.
+func (s *SSOService) SetDomainVerifier(v DomainVerifier) {
+	s.domainVerifier = v
 }
 
 // SSOProviderInfo represents a public SSO provider for a tenant.
@@ -600,10 +620,10 @@ func (s *SSOService) ensureTenantMembership(ctx context.Context, u *userdom.User
 
 	emailDomain := ""
 	if parts := strings.SplitN(email, "@", 2); len(parts) == 2 {
-		emailDomain = parts[1]
+		emailDomain = strings.ToLower(parts[1])
 	}
 
-	if !rp.autoProvision || !rp.isDomainAllowedForProvisioning(emailDomain) {
+	if !s.jitProvisioningAllowed(ctx, t.ID().String(), rp, emailDomain) {
 		s.logger.Warn("SSO login refused: not a member and JIT provisioning not permitted",
 			"user_id", u.ID().String(), "tenant_id", t.ID().String(),
 			"source", rp.source, "auto_provision", rp.autoProvision)
@@ -627,6 +647,43 @@ func (s *SSOService) ensureTenantMembership(ctx context.Context, u *userdom.User
 	s.logger.Info("SSO auto-provisioned tenant membership",
 		"user_id", u.ID().String(), "tenant_id", t.ID().String(), "role", rp.defaultRole)
 	return nil
+}
+
+// jitProvisioningAllowed decides whether a non-member with emailDomain may be
+// JIT auto-provisioned into the tenant. Fail-closed at every branch.
+//
+// The provider must opt in (rp.autoProvision). Then:
+//   - SSO P1 (domainVerifier wired): the domain MUST be DNS-verified for the
+//     tenant — this is the PRIMARY gate. If the provider ALSO configured a
+//     non-empty AllowedDomains allow-list, the domain must additionally be on
+//     it (an admin may narrow further). A verifier error ⇒ refuse.
+//   - Pre-wiring fallback (domainVerifier nil): the P0 behavior — the domain
+//     must be on a NON-EMPTY AllowedDomains allow-list (empty ⇒ refuse).
+func (s *SSOService) jitProvisioningAllowed(ctx context.Context, tenantID string, rp *resolvedProvider, emailDomain string) bool {
+	if !rp.autoProvision || emailDomain == "" {
+		return false
+	}
+
+	if s.domainVerifier == nil {
+		// Fallback: P0 config-AllowedDomains gate (fail-closed on empty list).
+		return rp.isDomainAllowedForProvisioning(emailDomain)
+	}
+
+	verified, err := s.domainVerifier.IsVerifiedDomain(ctx, tenantID, emailDomain)
+	if err != nil {
+		s.logger.Warn("verified-domain check failed; refusing JIT (fail-closed)",
+			"tenant_id", tenantID, "error", err)
+		return false
+	}
+	if !verified {
+		return false
+	}
+	// Verified domain confirmed. If the provider ALSO narrows via AllowedDomains,
+	// require BOTH (verified AND on the allow-list).
+	if len(rp.allowedDomains) > 0 && !rp.isDomainAllowed(emailDomain) {
+		return false
+	}
+	return true
 }
 
 // verifyIDToken validates the provider's id_token against its JWKS, the flow
