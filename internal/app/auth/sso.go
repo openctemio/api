@@ -208,8 +208,18 @@ type SSOAuthorizeResult struct {
 	State            string `json:"state"`
 }
 
-// validateRedirectURI validates the redirect URI for security.
-func validateRedirectURI(uri string) error {
+// validateRedirectURI pins the caller-supplied redirect_uri to the configured
+// exact-match allow-list (OAuth 2.1 / RFC 9700 open-redirect guard). Previously
+// any syntactically valid http/https URL was accepted, so the SSO flow would
+// return an authorization code to ANY host the IdP happened to have registered.
+// Now the redirect_uri's ORIGIN (scheme+host+port) must match an allow-list
+// entry exactly — no wildcard, no suffix match — and, when an entry pins a path
+// prefix, the path must fall within it. Fail-closed: an empty allow-list rejects
+// every URI.
+func (s *SSOService) validateRedirectURI(uri string) error {
+	if uri == "" {
+		return fmt.Errorf("%w: empty", ErrSSOInvalidRedirectURI)
+	}
 	if len(uri) > ssoMaxRedirectURILength {
 		return fmt.Errorf("%w: too long", ErrSSOInvalidRedirectURI)
 	}
@@ -223,7 +233,44 @@ func validateRedirectURI(uri string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("%w: missing host", ErrSSOInvalidRedirectURI)
 	}
-	return nil
+	// Embedded credentials (user:pass@host) are a classic spoofing vector — the
+	// real host can be pushed past a naive parser. Reject outright.
+	if parsed.User != nil {
+		return fmt.Errorf("%w: userinfo not allowed", ErrSSOInvalidRedirectURI)
+	}
+	for _, allowed := range s.authConfig.AllowedRedirectURIs {
+		if redirectURIMatches(parsed, allowed) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: not in allow-list", ErrSSOInvalidRedirectURI)
+}
+
+// redirectURIMatches reports whether parsed matches an allow-list entry. Scheme
+// and host (incl. port) must be exactly equal (case-insensitive host). An entry
+// with no path — or a bare "/" — authorizes any path on that exact origin; an
+// entry with a path is an exact match or a strict single-segment path-prefix
+// (entry ends in "/"), so path-traversal ("..") and extra "/segments" are
+// rejected.
+func redirectURIMatches(parsed *url.URL, allowed string) bool {
+	a, err := url.Parse(strings.TrimSpace(allowed))
+	if err != nil || a.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(parsed.Scheme, a.Scheme) || !strings.EqualFold(parsed.Host, a.Host) {
+		return false
+	}
+	if a.Path == "" || a.Path == "/" {
+		return true // origin-only entry: any path on this exact origin
+	}
+	if parsed.Path == a.Path {
+		return true // exact path match
+	}
+	if strings.HasSuffix(a.Path, "/") && strings.HasPrefix(parsed.Path, a.Path) {
+		rest := parsed.Path[len(a.Path):]
+		return rest != "" && !strings.Contains(rest, "/") && !strings.Contains(rest, "..")
+	}
+	return false
 }
 
 // resolvedProvider is the effective SSO provider config for a tenant+provider,
@@ -390,8 +437,9 @@ func (s *SSOService) envProvider(orgSlug string, provider identityproviderdom.Pr
 
 // GenerateAuthorizeURL builds the OAuth authorization URL for a tenant's SSO provider.
 func (s *SSOService) GenerateAuthorizeURL(ctx context.Context, input SSOAuthorizeInput) (*SSOAuthorizeResult, error) {
-	// SECURITY: Validate redirect URI to prevent open redirect attacks
-	if err := validateRedirectURI(input.RedirectURI); err != nil {
+	// SECURITY: Validate redirect URI against the exact-match allow-list to
+	// prevent open redirect attacks (OAuth 2.1 / RFC 9700).
+	if err := s.validateRedirectURI(input.RedirectURI); err != nil {
 		return nil, err
 	}
 
@@ -406,8 +454,10 @@ func (s *SSOService) GenerateAuthorizeURL(ctx context.Context, input SSOAuthoriz
 		return nil, err
 	}
 
-	// Generate state token with nonce for CSRF + replay protection
-	state, nonce, err := s.generateState(input.OrgSlug, input.Provider)
+	// Generate state token with nonce (CSRF + replay) and a PKCE code_challenge
+	// (RFC 7636). The verifier is carried, encrypted, inside the signed state and
+	// recovered at callback — see generateState.
+	state, nonce, codeChallenge, err := s.generateState(input.OrgSlug, input.Provider)
 	if err != nil {
 		return nil, fmt.Errorf("generate state: %w", err)
 	}
@@ -425,6 +475,13 @@ func (s *SSOService) GenerateAuthorizeURL(ctx context.Context, input SSOAuthoriz
 	params.Set("state", state)
 	params.Set("response_type", "code")
 	params.Set("nonce", nonce) // ID token replay prevention
+
+	// PKCE (RFC 7636, S256). All supported OIDC providers (Entra ID, Okta,
+	// Google Workspace) accept S256, so this is unconditional — it defends the
+	// authorization code against interception even beyond the confidential
+	// client_secret already used at token exchange.
+	params.Set("code_challenge", codeChallenge)
+	params.Set("code_challenge_method", "S256")
 
 	if len(rp.scopes) > 0 {
 		params.Set("scope", strings.Join(rp.scopes, " "))
@@ -470,13 +527,22 @@ type SSOCallbackResult struct {
 
 // HandleCallback handles the SSO OAuth callback.
 func (s *SSOService) HandleCallback(ctx context.Context, input SSOCallbackInput) (*SSOCallbackResult, error) {
-	// Validate state and extract org slug + nonce
-	orgSlug, stateProvider, nonce, err := s.validateState(input.State)
+	// Validate state and extract org slug + nonce + PKCE verifier
+	orgSlug, stateProvider, nonce, codeVerifier, err := s.validateState(input.State)
 	if err != nil {
 		return nil, ErrSSOInvalidState
 	}
 
 	if stateProvider != input.Provider {
+		return nil, ErrSSOInvalidState
+	}
+
+	// PKCE: the authorize step always sent a code_challenge, so a verifier MUST
+	// be present. A missing verifier means the state was tampered with or forged
+	// (or predates PKCE) — fail closed rather than downgrade to a non-PKCE
+	// exchange.
+	if codeVerifier == "" {
+		s.logger.Warn("SSO callback refused: missing PKCE verifier in state", "provider", input.Provider)
 		return nil, ErrSSOInvalidState
 	}
 
@@ -493,9 +559,9 @@ func (s *SSOService) HandleCallback(ctx context.Context, input SSOCallbackInput)
 		return nil, err
 	}
 
-	// Exchange code for tokens
+	// Exchange code for tokens (includes the PKCE code_verifier, RFC 7636)
 	_, tokenURL, _ := rp.provider.AuthEndpoints(rp.tenantIdentifier)
-	tokens, err := s.exchangeCode(ctx, rp.clientID, rp.clientSecret, input.Code, input.RedirectURI, tokenURL)
+	tokens, err := s.exchangeCode(ctx, rp.clientID, rp.clientSecret, input.Code, input.RedirectURI, tokenURL, codeVerifier)
 	if err != nil {
 		s.logger.Error("SSO code exchange failed", "provider", input.Provider, "error", err)
 		return nil, ErrSSOExchangeFailed
@@ -742,37 +808,63 @@ func entraUserInfoFromClaims(claims *oidcClaims) (*SSOUserInfo, error) {
 	}, nil
 }
 
-// generateState generates a signed state token containing org slug, provider, and nonce.
-func (s *SSOService) generateState(orgSlug, provider string) (state string, nonce string, err error) {
+// generateState generates a signed state token containing org slug, provider,
+// nonce, and the PKCE verifier (stored ENCRYPTED), and returns the matching
+// S256 code_challenge for the authorize URL.
+//
+// PKCE verifier storage — the crux: unlike Path A (oauth.go), which embeds the
+// RAW verifier in the signed-but-unencrypted state, this state round-trips
+// through the browser AND is sent to the IdP as the `state` param, so anything
+// stored in the clear there is exposed to a redirect interceptor — which would
+// defeat PKCE. We instead ENCRYPT the verifier (AES-256-GCM via s.encryptor,
+// the same encryptor used for client secrets) before placing it in the state.
+// An interceptor sees only opaque ciphertext; only this server (holding
+// APP_ENCRYPTION_KEY) can recover the verifier at callback. This is stateless
+// (works across replicas, unlike an in-memory store) and needs no cookie/proxy
+// changes — the verifier rides inside the existing `state` the UI already
+// round-trips. (In dev without APP_ENCRYPTION_KEY the encryptor is a no-op, so
+// the verifier is plaintext — same posture as Path A, acceptable for dev only.)
+func (s *SSOService) generateState(orgSlug, provider string) (state, nonce, codeChallenge string, err error) {
 	randomBytes := make([]byte, 16)
 	if _, err := rand.Read(randomBytes); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	// Generate nonce for ID token replay prevention
 	nonceBytes := make([]byte, 16)
 	if _, err := rand.Read(nonceBytes); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	nonce = base64.RawURLEncoding.EncodeToString(nonceBytes)
+
+	// PKCE (RFC 7636): random verifier + S256 challenge.
+	verifier, challenge, pkceErr := generatePKCE()
+	if pkceErr != nil {
+		return "", "", "", pkceErr
+	}
+	encVerifier, encErr := s.encryptor.EncryptString(verifier)
+	if encErr != nil {
+		return "", "", "", fmt.Errorf("encrypt pkce verifier: %w", encErr)
+	}
 
 	stateData := map[string]interface{}{
 		"org":      orgSlug,
 		"provider": provider,
 		"nonce":    nonce,
+		"pkce":     encVerifier,
 		"random":   base64.URLEncoding.EncodeToString(randomBytes),
 		"exp":      time.Now().Add(10 * time.Minute).Unix(),
 	}
 
 	stateJSON, marshalErr := json.Marshal(stateData)
 	if marshalErr != nil {
-		return "", "", marshalErr
+		return "", "", "", marshalErr
 	}
 
 	stateBase64 := base64.URLEncoding.EncodeToString(stateJSON)
 	signature := s.signState(stateBase64)
 
-	return stateBase64 + "." + signature, nonce, nil
+	return stateBase64 + "." + signature, nonce, challenge, nil
 }
 
 // signState creates an HMAC signature for the state.
@@ -782,12 +874,13 @@ func (s *SSOService) signState(data string) string {
 	return base64.URLEncoding.EncodeToString(h.Sum(nil))
 }
 
-// validateState validates the state token and returns org slug, provider, and
-// the nonce embedded at authorize time (compared against the id_token nonce).
-func (s *SSOService) validateState(state string) (orgSlug, provider, nonce string, err error) {
+// validateState validates the state token and returns org slug, provider, the
+// nonce embedded at authorize time (compared against the id_token nonce), and
+// the decrypted PKCE code_verifier (RFC 7636) for the token exchange.
+func (s *SSOService) validateState(state string) (orgSlug, provider, nonce, codeVerifier string, err error) {
 	parts := strings.SplitN(state, ".", 2)
 	if len(parts) != 2 {
-		return "", "", "", errors.New("invalid state format")
+		return "", "", "", "", errors.New("invalid state format")
 	}
 
 	stateData, signature := parts[0], parts[1]
@@ -795,37 +888,48 @@ func (s *SSOService) validateState(state string) (orgSlug, provider, nonce strin
 	// Verify signature
 	expectedSig := s.signState(stateData)
 	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
-		return "", "", "", errors.New("invalid state signature")
+		return "", "", "", "", errors.New("invalid state signature")
 	}
 
 	// Decode state data
 	stateJSON, err := base64.URLEncoding.DecodeString(stateData)
 	if err != nil {
-		return "", "", "", errors.New("invalid state encoding")
+		return "", "", "", "", errors.New("invalid state encoding")
 	}
 
 	var data map[string]interface{}
 	if err := json.Unmarshal(stateJSON, &data); err != nil {
-		return "", "", "", errors.New("invalid state JSON")
+		return "", "", "", "", errors.New("invalid state JSON")
 	}
 
 	// Check expiration
 	expFloat, ok := data["exp"].(float64)
 	if !ok {
-		return "", "", "", errors.New("invalid state expiration")
+		return "", "", "", "", errors.New("invalid state expiration")
 	}
 	if time.Now().Unix() > int64(expFloat) {
-		return "", "", "", errors.New("state expired")
+		return "", "", "", "", errors.New("state expired")
 	}
 
 	orgSlug, _ = data["org"].(string)
 	provider, _ = data["provider"].(string)
 	nonce, _ = data["nonce"].(string)
 	if orgSlug == "" || provider == "" {
-		return "", "", "", errors.New("missing state fields")
+		return "", "", "", "", errors.New("missing state fields")
 	}
 
-	return orgSlug, provider, nonce, nil
+	// Recover the PKCE verifier: it was AES-GCM-encrypted at authorize time (see
+	// generateState). A decryption failure means the ciphertext was tampered with
+	// — fail closed.
+	if enc, encOK := data["pkce"].(string); encOK && enc != "" {
+		v, decErr := s.encryptor.DecryptString(enc)
+		if decErr != nil {
+			return "", "", "", "", errors.New("invalid state pkce")
+		}
+		codeVerifier = v
+	}
+
+	return orgSlug, provider, nonce, codeVerifier, nil
 }
 
 // ssoTokens represents OAuth token response.
@@ -834,14 +938,22 @@ type ssoTokens struct {
 	IDToken     string `json:"id_token"`
 }
 
-// exchangeCode exchanges authorization code for tokens.
-func (s *SSOService) exchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI, tokenURL string) (*ssoTokens, error) {
+// exchangeCode exchanges authorization code for tokens, sending the PKCE
+// code_verifier (RFC 7636) so the IdP can bind the code to the earlier
+// code_challenge.
+func (s *SSOService) exchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI, tokenURL, codeVerifier string) (*ssoTokens, error) {
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("client_secret", clientSecret)
 	data.Set("code", code)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
+
+	// PKCE: proves possession of the verifier whose S256 hash was sent as the
+	// code_challenge at authorize time.
+	if codeVerifier != "" {
+		data.Set("code_verifier", codeVerifier)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
