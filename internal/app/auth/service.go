@@ -753,8 +753,11 @@ func (s *AuthService) enforceSSOPolicy(ctx context.Context, sess *sessiondom.Ses
 		return fmt.Errorf("failed to load tenant for SSO enforcement: %w", err)
 	}
 	if ssoEnforcementDenied(sess.AuthMethod(), role, t.TypedSettings().Security.SSOEnforced) {
+		// Log the parsed tenant id (a CodeQL-recognized barrier) + the parsed
+		// user id; omit the raw role string to keep no user-derived value in the
+		// log entry (CWE-117). The blocked event is fully identified by tenant+user.
 		s.logger.Warn("blocked password session from SSO-enforced tenant",
-			"tenant_id", tenantID, "user_id", sess.UserID().String(), "role", role)
+			"tenant_id", tid.String(), "user_id", sess.UserID().String())
 		return ErrSSORequired
 	}
 	return nil
