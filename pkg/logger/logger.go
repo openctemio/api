@@ -365,8 +365,14 @@ func SanitizeValue(s string) string {
 	if len(s) > maxLen {
 		s = s[:maxLen]
 	}
+	// Remove the forging characters explicitly first. strings.Map alone is
+	// sufficient at runtime, but the explicit ReplaceAll pair is the form static
+	// analyzers recognize as a log-injection barrier (CodeQL go/log-injection).
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	// Then drop any remaining control characters.
 	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r < 0x20 {
+		if r < 0x20 {
 			return -1
 		}
 		return r
