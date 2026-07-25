@@ -32,7 +32,7 @@ func Timeout(timeout time.Duration) func(http.Handler) http.Handler {
 // goroutine we started ourselves. Without the recover below, a single panic on
 // any route killed the process and dropped every in-flight request. The recover
 // must therefore live INSIDE the goroutine; it mirrors RecoveryWithConfig's
-// behaviour (log + 500) rather than re-panicking onto the parent.
+// behavior (log + 500) rather than re-panicking onto the parent.
 func TimeoutWithLogger(timeout time.Duration, log *logger.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +49,9 @@ func TimeoutWithLogger(timeout time.Duration, log *logger.Logger) func(http.Hand
 			}
 
 			go func() {
+				// close(done) is its own defer so the recover below can `return`
+				// after writing the 500 without skipping it (defers run LIFO).
+				defer close(done)
 				defer func() {
 					if rec := recover(); rec != nil {
 						if log != nil {
@@ -56,7 +59,10 @@ func TimeoutWithLogger(timeout time.Duration, log *logger.Logger) func(http.Hand
 								"error", rec,
 								"stack", string(debug.Stack()),
 								"request_id", GetRequestID(r.Context()),
-								"path", r.URL.Path,
+								// Sanitized: the path is attacker-controlled and the text
+								// handler emits plain lines, so a raw CR/LF here would let a
+								// caller forge log entries (CodeQL go/log-injection).
+								"path", logger.SanitizeValue(r.URL.Path),
 							)
 						}
 						// Report a 500 unless something was already written, or
@@ -67,9 +73,9 @@ func TimeoutWithLogger(timeout time.Duration, log *logger.Logger) func(http.Hand
 						tw.mu.Unlock()
 						if !handled {
 							http.Error(tw.ResponseWriter, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+							return
 						}
 					}
-					close(done)
 				}()
 				next.ServeHTTP(tw, r.WithContext(ctx))
 			}()
