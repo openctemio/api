@@ -88,7 +88,7 @@ type SemgrepError struct {
 	Level   string `json:"level,omitempty"`
 	Message string `json:"message,omitempty"`
 	// semgrep's schema (semgrep_output_v1.atd) declares core_error.type as a
-	// CONSTRUCTOR, so it serialises either as a plain string or as an array —
+	// CONSTRUCTOR, so it serializes either as a plain string or as an array —
 	// e.g. ["PartialParsing", [{...}]] whenever a file only partially parses,
 	// which is routine on large repos. Typing it as string made json.Unmarshal
 	// fail for the WHOLE document, so Convert errored, CanConvert returned false,

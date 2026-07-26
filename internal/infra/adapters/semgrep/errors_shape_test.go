@@ -6,7 +6,7 @@ import (
 )
 
 // semgrep's own schema (semgrep_output_v1.atd) declares core_error.type as a
-// CONSTRUCTOR, which serialises as an ARRAY — e.g.
+// CONSTRUCTOR, which serializes as an ARRAY — e.g.
 //
 //	"type": ["PartialParsing", [{"path": "a.go", ...}]]
 //
