@@ -70,11 +70,24 @@ docker run -d --name "$CONTAINER" \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
   postgres:17-alpine >/dev/null 2>&1 || { echo "check-sql-schema: could not start postgres" >&2; exit 2; }
 
-for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -U postgres -d gate >/dev/null 2>&1 && break
+# The official image bootstraps in two phases: initdb starts a TEMPORARY server,
+# creates the database, shuts it down, then starts the real one. pg_isready is
+# satisfied by that temporary server, so probing it races the restart — locally
+# the timing happened to work, in CI it caught the shutdown and reported
+# "database gate does not exist". Require a real query to succeed TWICE in a row
+# instead: that can only happen once the final server is up.
+ready=0
+for _ in $(seq 1 90); do
+  if docker exec "$CONTAINER" psql -U postgres -d gate -c 'SELECT 1' >/dev/null 2>&1; then
+    ready=$((ready + 1))
+    [ "$ready" -ge 2 ] && break
+  else
+    ready=0
+  fi
   sleep 1
 done
-if ! docker exec "$CONTAINER" pg_isready -U postgres -d gate >/dev/null 2>&1; then
+
+if [ "$ready" -lt 2 ]; then
   echo "check-sql-schema: postgres never became ready — container output follows:" >&2
   docker logs "$CONTAINER" 2>&1 | tail -30 | sed 's/^/    /' >&2
   exit 2
