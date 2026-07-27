@@ -99,8 +99,10 @@ lint-new:
 	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION) against $(BASE_REF)..."
 	@GOWORK=off $(GOLANGCI_LINT) run --new-from-rev=$(BASE_REF) ./...
 
-## lint-ci: Run the linters CI gates on (go vet + staticcheck + lint-new)
-lint-ci:
+## lint-ci: Run exactly what CI's Lint job gates on (go vet + staticcheck + lint-new).
+## The whole point of this target is that it IS what CI runs — nothing else uses
+## it. If you add a step to the Lint job, add it here in the same commit.
+lint-ci: lint-new
 	@echo "Running go vet..."
 	@GOWORK=off go vet ./...
 	@echo "Running staticcheck..."
