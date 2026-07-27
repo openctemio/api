@@ -38,6 +38,10 @@
 # Usage:  scripts/check-sql-schema.sh [--keep]
 # Exit:   0 = no drift, 1 = drift found, 2 = usage or environment error
 # =============================================================================
+# GitHub Actions invokes steps as `bash -e {0}`, so errexit is inherited even
+# though this script handles every failure explicitly. Under -e the readiness
+# probe below — which is SUPPOSED to fail while Postgres boots — killed the run.
+set +e
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,15 +67,18 @@ psql_q() { docker exec -i "$CONTAINER" psql -U postgres -d gate -v ON_ERROR_STOP
 echo "check-sql-schema: starting a throwaway PostgreSQL…"
 docker run -d --name "$CONTAINER" \
   -e POSTGRES_PASSWORD=gate -e POSTGRES_DB=gate \
-  --tmpfs /var/lib/postgresql/data \
+  -e POSTGRES_HOST_AUTH_METHOD=trust \
   postgres:17-alpine >/dev/null 2>&1 || { echo "check-sql-schema: could not start postgres" >&2; exit 2; }
 
 for _ in $(seq 1 60); do
   docker exec "$CONTAINER" pg_isready -U postgres -d gate >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec "$CONTAINER" pg_isready -U postgres -d gate >/dev/null 2>&1 || {
-  echo "check-sql-schema: postgres never became ready" >&2; exit 2; }
+if ! docker exec "$CONTAINER" pg_isready -U postgres -d gate >/dev/null 2>&1; then
+  echo "check-sql-schema: postgres never became ready — container output follows:" >&2
+  docker logs "$CONTAINER" 2>&1 | tail -30 | sed 's/^/    /' >&2
+  exit 2
+fi
 
 # --- 2. apply the migrations, in order ---------------------------------------
 echo "check-sql-schema: applying migrations…"
