@@ -86,12 +86,20 @@ test-load-bench:
 GOLANGCI_LINT_VERSION ?= v1.64.8
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
-## lint: Run linter (golangci-lint, pinned). Note: CI's lint gate is `go vet` + staticcheck (see `make lint-ci`).
+## lint: Run linter (golangci-lint, pinned) over the whole tree.
 lint:
 	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION)..."
 	@GOWORK=off $(GOLANGCI_LINT) run ./...
 
-## lint-ci: Run the exact linters CI gates on (go vet + staticcheck)
+## lint-new: golangci-lint on code this branch adds, which is what CI gates on.
+## develop carries pre-existing findings; this freezes that debt instead of
+## blocking every PR on it. BASE_REF defaults to origin/develop.
+BASE_REF ?= origin/develop
+lint-new:
+	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION) against $(BASE_REF)..."
+	@GOWORK=off $(GOLANGCI_LINT) run --new-from-rev=$(BASE_REF) ./...
+
+## lint-ci: Run the linters CI gates on (go vet + staticcheck + lint-new)
 lint-ci:
 	@echo "Running go vet..."
 	@GOWORK=off go vet ./...
