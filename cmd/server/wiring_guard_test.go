@@ -6,7 +6,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
-	"io/fs"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -52,20 +52,25 @@ var optionalPrioritySeams = map[string]string{}
 func prioritySeamsWiredInCmdServer(t *testing.T) map[string]bool {
 	t.Helper()
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse cmd/server sources: %v", err)
-	}
-	if len(pkgs) == 0 {
-		t.Fatal("parsed no packages in cmd/server; this test would pass vacuously")
+		t.Fatalf("read cmd/server: %v", err)
 	}
 
+	fset := token.NewFileSet()
 	wired := make(map[string]bool)
-	for _, pkg := range pkgs {
-		ast.Inspect(pkg, func(n ast.Node) bool {
+	parsed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		parsed++
+		ast.Inspect(file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
 				return true
@@ -79,6 +84,10 @@ func prioritySeamsWiredInCmdServer(t *testing.T) map[string]bool {
 			}
 			return true
 		})
+	}
+	// Without this the test passes vacuously if the sources ever move.
+	if parsed == 0 {
+		t.Fatal("parsed no cmd/server sources; the guard is not guarding anything")
 	}
 	return wired
 }
