@@ -102,9 +102,9 @@ func TestRateLimitedProvider_HonorsCallerContext(t *testing.T) {
 }
 
 // TestRateLimitedProvider_SharedBudgetAcrossProviders proves the cap is a
-// process-wide budget, not a per-provider-instance one. Two providers built
-// from the same credential scope share the allowance — otherwise every triage
-// job could mint a fresh limiter and the cap would mean nothing.
+// process-wide budget, not a per-provider-instance one. Two providers in the
+// same budget scope share the allowance — otherwise every triage job could
+// mint a fresh limiter and the cap would mean nothing.
 func TestRateLimitedProvider_SharedBudgetAcrossProviders(t *testing.T) {
 	t.Parallel()
 
@@ -126,7 +126,7 @@ func TestRateLimitedProvider_SharedBudgetAcrossProviders(t *testing.T) {
 		t.Fatalf("second call rejected: %v", err)
 	}
 	if _, err := pb.Complete(ctx, CompletionRequest{}); err == nil {
-		t.Fatal("third call across two providers sharing one credential was allowed; " +
+		t.Fatal("third call across two providers in one budget scope was allowed; " +
 			"the RPM budget is per-instance, so the cap can be trivially bypassed")
 	}
 }

@@ -16,7 +16,7 @@ type Factory struct {
 	encryptor               crypto.Encryptor
 	requireEncryptedAPIKeys bool // SECURITY: When true, rejects plaintext API keys
 
-	// limiters enforce AI_RATE_LIMIT_RPM. One limiter per credential scope,
+	// limiters enforce AI_RATE_LIMIT_RPM. One limiter per budget scope,
 	// shared process-wide, so the cap holds across concurrent triage jobs
 	// rather than per-call. See ratelimit.go.
 	limiters *limiterRegistry
@@ -59,7 +59,7 @@ func NewFactoryWithEncryptionLegacy(cfg config.AITriageConfig, encryptor crypto.
 	}
 }
 
-// rateLimited wraps p with the shared limiter for the given credential scope.
+// rateLimited wraps p with the shared limiter for the given budget scope.
 // AI_RATE_LIMIT_RPM <= 0 disables the cap and returns p unchanged.
 //
 // Without this, AI_RATE_LIMIT_RPM was parsed and never read: an operator could
