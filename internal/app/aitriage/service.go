@@ -424,8 +424,10 @@ func (s *AITriageService) ProcessTriage(ctx context.Context, resultID, tenantID,
 		return s.failTriage(ctx, result, "failed to get finding: "+err.Error())
 	}
 
-	// Create LLM provider
-	provider, err := s.llmFactory.CreateProvider(aiSettings)
+	// Create LLM provider. Passing the tenant scopes the AI_RATE_LIMIT_RPM
+	// budget: platform-mode tenants share the platform key's allowance,
+	// each BYOK tenant gets its own.
+	provider, err := s.llmFactory.CreateProviderForTenant(tenantID.String(), aiSettings)
 	if err != nil {
 		// SECURITY: Log detailed error internally, return generic message to prevent info disclosure
 		s.logger.Error("failed to create LLM provider", "error", err, "result_id", resultID.String())

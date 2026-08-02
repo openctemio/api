@@ -109,28 +109,41 @@ func (f *Factory) decryptAPIKey(key string) (string, error) {
 // CreateProvider creates an LLM provider based on tenant settings.
 // If tenant uses platform AI, uses platform config.
 // If tenant uses BYOK, uses tenant's API key.
+//
+// BYOK providers built this way share one rate-limit budget. Prefer
+// CreateProviderForTenant, which gives each BYOK tenant its own.
 func (f *Factory) CreateProvider(aiSettings tenant.AISettings) (Provider, error) {
+	return f.CreateProviderForTenant("", aiSettings)
+}
+
+// CreateProviderForTenant is CreateProvider with the caller's tenant identity,
+// which scopes the AI_RATE_LIMIT_RPM budget: platform-mode tenants share the
+// platform key's allowance because they share its bill, while each BYOK tenant
+// gets its own.
+func (f *Factory) CreateProviderForTenant(tenantID string, aiSettings tenant.AISettings) (Provider, error) {
+	scope := budgetScope(aiSettings.Mode, tenantID)
+
 	switch aiSettings.Mode {
 	case tenant.AIModeDisabled:
 		return nil, fmt.Errorf("%w: AI is disabled for this tenant", ErrProviderNotConfigured)
 
 	case tenant.AIModePlatform:
-		return f.createPlatformProvider()
+		return f.createPlatformProvider(scope)
 
 	case tenant.AIModeBYOK:
-		return f.createBYOKProvider(aiSettings)
+		return f.createBYOKProvider(aiSettings, scope)
 
 	default:
 		// Default to platform if mode is empty
 		if aiSettings.Mode == "" {
-			return f.createPlatformProvider()
+			return f.createPlatformProvider(scope)
 		}
 		return nil, fmt.Errorf("%w: unknown AI mode: %s", ErrInvalidProvider, aiSettings.Mode)
 	}
 }
 
 // createPlatformProvider creates a provider using platform configuration.
-func (f *Factory) createPlatformProvider() (Provider, error) {
+func (f *Factory) createPlatformProvider(scope string) (Provider, error) {
 	if !f.platformConfig.Enabled {
 		return nil, fmt.Errorf("%w: platform AI is not enabled", ErrProviderNotConfigured)
 	}
@@ -146,7 +159,7 @@ func (f *Factory) createPlatformProvider() (Provider, error) {
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
-		return f.rateLimited(p, err, credentialScope("platform", f.platformConfig.AnthropicAPIKey))
+		return f.rateLimited(p, err, scope)
 
 	case "openai":
 		if f.platformConfig.OpenAIAPIKey == "" {
@@ -158,7 +171,7 @@ func (f *Factory) createPlatformProvider() (Provider, error) {
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
-		return f.rateLimited(p, err, credentialScope("platform", f.platformConfig.OpenAIAPIKey))
+		return f.rateLimited(p, err, scope)
 
 	case "gemini":
 		if f.platformConfig.GeminiAPIKey == "" {
@@ -170,7 +183,7 @@ func (f *Factory) createPlatformProvider() (Provider, error) {
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
-		return f.rateLimited(p, err, credentialScope("platform", f.platformConfig.GeminiAPIKey))
+		return f.rateLimited(p, err, scope)
 
 	default:
 		return nil, fmt.Errorf("%w: unknown platform provider: %s", ErrInvalidProvider, f.platformConfig.PlatformProvider)
@@ -178,7 +191,7 @@ func (f *Factory) createPlatformProvider() (Provider, error) {
 }
 
 // createBYOKProvider creates a provider using tenant's own API key.
-func (f *Factory) createBYOKProvider(settings tenant.AISettings) (Provider, error) {
+func (f *Factory) createBYOKProvider(settings tenant.AISettings, scope string) (Provider, error) {
 	if settings.APIKey == "" {
 		return nil, fmt.Errorf("%w: tenant API key not configured", ErrProviderNotConfigured)
 	}
@@ -188,10 +201,6 @@ func (f *Factory) createBYOKProvider(settings tenant.AISettings) (Provider, erro
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProviderNotConfigured, err)
 	}
-
-	// A BYOK tenant pays its own LLM bill, so it gets its own RPM budget keyed
-	// on its credential rather than sharing the platform's.
-	scope := credentialScope("byok", apiKey)
 
 	switch settings.Provider {
 	case tenant.LLMProviderClaude:

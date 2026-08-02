@@ -2,13 +2,13 @@ package llm
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/openctemio/api/pkg/domain/tenant"
 )
 
 // DefaultRateLimitMaxWait bounds how long a call parks waiting for a token.
@@ -68,10 +68,34 @@ func newRPMLimiter(rpm int) *rate.Limiter {
 	return rate.NewLimiter(rate.Limit(float64(rpm)/60.0), rpm)
 }
 
-// limiterRegistry hands out one limiter per credential scope, keyed so that
-// every caller spending the same API key shares one budget. Platform-mode
-// tenants share the platform key and therefore share the cap; a BYOK tenant
-// pays its own bill and gets its own.
+// Budget scopes. Everything sharing a scope shares one RPM allowance.
+const (
+	// platformBudgetScope covers every tenant running in platform mode: they
+	// all spend the platform's API key, so they share its cap.
+	platformBudgetScope = "platform"
+	// byokBudgetScopePrefix is joined with the tenant ID. A BYOK tenant pays
+	// its own LLM bill, so it gets its own allowance and cannot be starved by
+	// (or starve) anyone else.
+	byokBudgetScopePrefix = "byok:"
+)
+
+// budgetScope returns the limiter key for a tenant's AI mode. It is
+// deliberately derived from the tenant identity and never from the API key:
+// the credential must not end up in a map key that could be logged or dumped,
+// and identity is the more accurate unit of billing anyway.
+func budgetScope(mode tenant.AIMode, tenantID string) string {
+	if mode != tenant.AIModeBYOK {
+		return platformBudgetScope
+	}
+	if tenantID == "" {
+		// No identity supplied: fall back to one shared BYOK bucket rather
+		// than silently handing out an unlimited per-call allowance.
+		return byokBudgetScopePrefix + "unscoped"
+	}
+	return byokBudgetScopePrefix + tenantID
+}
+
+// limiterRegistry hands out one limiter per budget scope.
 type limiterRegistry struct {
 	mu       sync.Mutex
 	limiters map[string]*rate.Limiter
@@ -94,15 +118,4 @@ func (r *limiterRegistry) get(scope string, rpm int) *rate.Limiter {
 	l := newRPMLimiter(rpm)
 	r.limiters[scope] = l
 	return l
-}
-
-// credentialScope derives a stable, non-reversible key for an API key so that
-// limiters can be shared per credential without ever holding the secret in a
-// map key that might be logged or dumped.
-func credentialScope(prefix, apiKey string) string {
-	if apiKey == "" {
-		return prefix
-	}
-	sum := sha256.Sum256([]byte(apiKey))
-	return prefix + ":" + hex.EncodeToString(sum[:8])
 }

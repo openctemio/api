@@ -111,7 +111,7 @@ func TestRateLimitedProvider_SharedBudgetAcrossProviders(t *testing.T) {
 	const rpm = 2
 
 	reg := newLimiterRegistry()
-	scope := credentialScope("platform", "sk-test-key")
+	scope := budgetScope(tenant.AIModePlatform, "")
 
 	a := &countingProvider{}
 	b := &countingProvider{}
@@ -131,26 +131,40 @@ func TestRateLimitedProvider_SharedBudgetAcrossProviders(t *testing.T) {
 	}
 }
 
-// TestCredentialScope_DoesNotLeakTheKey pins that the map key used to share
-// limiters is a digest, never the API key itself.
-func TestCredentialScope_DoesNotLeakTheKey(t *testing.T) {
+// TestBudgetScope pins how RPM allowances are partitioned: every platform-mode
+// tenant shares one budget (they share the platform key's bill), each BYOK
+// tenant gets its own, and the two never collide. The scope must be derived
+// from tenant identity, never from the API key — a credential has no business
+// being a map key that could be logged or dumped.
+func TestBudgetScope(t *testing.T) {
 	t.Parallel()
 
-	const key = "sk-super-secret-value"
-	scope := credentialScope("byok", key)
+	const tenantA, tenantB = "tenant-a", "tenant-b"
 
-	if scope == key || len(scope) == 0 {
-		t.Fatalf("credentialScope returned %q for the raw key", scope)
+	// Platform mode: identity is irrelevant, everyone shares the platform cap.
+	if got, want := budgetScope(tenant.AIModePlatform, tenantA), budgetScope(tenant.AIModePlatform, tenantB); got != want {
+		t.Errorf("platform-mode tenants got separate budgets (%q vs %q); "+
+			"they share one API key, so they must share its cap", got, want)
 	}
-	if got := credentialScope("byok", key); got != scope {
-		t.Fatalf("credentialScope is not stable: %q vs %q", got, scope)
+
+	// BYOK: each tenant gets its own budget.
+	byokA := budgetScope(tenant.AIModeBYOK, tenantA)
+	byokB := budgetScope(tenant.AIModeBYOK, tenantB)
+	if byokA == byokB {
+		t.Errorf("two BYOK tenants share budget %q; one can starve the other "+
+			"even though each pays its own LLM bill", byokA)
 	}
-	if same := credentialScope("byok", key+"x"); same == scope {
-		t.Fatal("credentialScope collided for two different keys")
+	if byokA != budgetScope(tenant.AIModeBYOK, tenantA) {
+		t.Error("budgetScope is not stable for the same tenant")
 	}
-	// Different prefixes must not share a budget.
-	if credentialScope("platform", key) == scope {
-		t.Fatal("platform and byok scopes collided for the same key")
+	if byokA == budgetScope(tenant.AIModePlatform, tenantA) {
+		t.Error("a tenant's BYOK budget collided with the platform budget")
+	}
+
+	// A BYOK caller with no identity must still land in a bounded bucket
+	// rather than getting a fresh unlimited allowance.
+	if s := budgetScope(tenant.AIModeBYOK, ""); s == "" {
+		t.Error("BYOK with no tenant ID produced an empty scope")
 	}
 }
 
