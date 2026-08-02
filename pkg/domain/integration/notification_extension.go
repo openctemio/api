@@ -156,7 +156,7 @@ func DefaultEnabledEventTypes() []EventType {
 		EventTypeNewExposure,
 		// A finding the operator already triaged as low-urgency silently
 		// becoming P0 is the escalation they cannot afford to miss, so it is
-		// on by default. Migration 000200 backfills existing rows; the
+		// on by default. Migration 000201 backfills existing rows; the
 		// per-integration severity filter still applies (P0 -> critical,
 		// P1 -> high, ...), so this is not a firehose.
 		EventTypeFindingPriorityEscalated,
