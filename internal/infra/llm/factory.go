@@ -15,6 +15,11 @@ type Factory struct {
 	platformConfig          config.AITriageConfig
 	encryptor               crypto.Encryptor
 	requireEncryptedAPIKeys bool // SECURITY: When true, rejects plaintext API keys
+
+	// limiters enforce AI_RATE_LIMIT_RPM. One limiter per credential scope,
+	// shared process-wide, so the cap holds across concurrent triage jobs
+	// rather than per-call. See ratelimit.go.
+	limiters *limiterRegistry
 }
 
 // NewFactory creates a new LLM provider factory.
@@ -22,6 +27,7 @@ func NewFactory(cfg config.AITriageConfig) *Factory {
 	return &Factory{
 		platformConfig: cfg,
 		encryptor:      crypto.NewNoOpEncryptor(), // Default to no-op for backward compatibility
+		limiters:       newLimiterRegistry(),
 	}
 }
 
@@ -35,6 +41,7 @@ func NewFactoryWithEncryption(cfg config.AITriageConfig, encryptor crypto.Encryp
 		platformConfig:          cfg,
 		encryptor:               encryptor,
 		requireEncryptedAPIKeys: true, // SECURITY: Enforce encryption by default
+		limiters:                newLimiterRegistry(),
 	}
 }
 
@@ -48,7 +55,28 @@ func NewFactoryWithEncryptionLegacy(cfg config.AITriageConfig, encryptor crypto.
 		platformConfig:          cfg,
 		encryptor:               encryptor,
 		requireEncryptedAPIKeys: false, // Allow plaintext during migration
+		limiters:                newLimiterRegistry(),
 	}
+}
+
+// rateLimited wraps p with the shared limiter for the given credential scope.
+// AI_RATE_LIMIT_RPM <= 0 disables the cap and returns p unchanged.
+//
+// Without this, AI_RATE_LIMIT_RPM was parsed and never read: an operator could
+// set it to bound LLM spend and nothing enforced it.
+func (f *Factory) rateLimited(p Provider, err error, scope string) (Provider, error) {
+	if err != nil || p == nil {
+		return p, err
+	}
+	rpm := f.platformConfig.RateLimitRPM
+	if rpm <= 0 {
+		return p, nil
+	}
+	if f.limiters == nil {
+		// Factory built as a zero value (tests); still enforce, just unshared.
+		f.limiters = newLimiterRegistry()
+	}
+	return newRateLimitedProvider(p, f.limiters.get(scope, rpm), rpm, DefaultRateLimitMaxWait), nil
 }
 
 // decryptAPIKey decrypts an API key if it's encrypted (has enc:v1: prefix).
@@ -112,34 +140,37 @@ func (f *Factory) createPlatformProvider() (Provider, error) {
 		if f.platformConfig.AnthropicAPIKey == "" {
 			return nil, fmt.Errorf("%w: ANTHROPIC_API_KEY not configured", ErrProviderNotConfigured)
 		}
-		return NewClaudeProvider(ClaudeConfig{
+		p, err := NewClaudeProvider(ClaudeConfig{
 			APIKey:     f.platformConfig.AnthropicAPIKey,
 			Model:      f.platformConfig.PlatformModel,
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
+		return f.rateLimited(p, err, credentialScope("platform", f.platformConfig.AnthropicAPIKey))
 
 	case "openai":
 		if f.platformConfig.OpenAIAPIKey == "" {
 			return nil, fmt.Errorf("%w: OPENAI_API_KEY not configured", ErrProviderNotConfigured)
 		}
-		return NewOpenAIProvider(OpenAIConfig{
+		p, err := NewOpenAIProvider(OpenAIConfig{
 			APIKey:     f.platformConfig.OpenAIAPIKey,
 			Model:      f.platformConfig.PlatformModel,
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
+		return f.rateLimited(p, err, credentialScope("platform", f.platformConfig.OpenAIAPIKey))
 
 	case "gemini":
 		if f.platformConfig.GeminiAPIKey == "" {
 			return nil, fmt.Errorf("%w: GEMINI_API_KEY not configured", ErrProviderNotConfigured)
 		}
-		return NewGeminiProvider(GeminiConfig{
+		p, err := NewGeminiProvider(GeminiConfig{
 			APIKey:     f.platformConfig.GeminiAPIKey,
 			Model:      f.platformConfig.PlatformModel,
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
+		return f.rateLimited(p, err, credentialScope("platform", f.platformConfig.GeminiAPIKey))
 
 	default:
 		return nil, fmt.Errorf("%w: unknown platform provider: %s", ErrInvalidProvider, f.platformConfig.PlatformProvider)
@@ -158,42 +189,49 @@ func (f *Factory) createBYOKProvider(settings tenant.AISettings) (Provider, erro
 		return nil, fmt.Errorf("%w: %v", ErrProviderNotConfigured, err)
 	}
 
+	// A BYOK tenant pays its own LLM bill, so it gets its own RPM budget keyed
+	// on its credential rather than sharing the platform's.
+	scope := credentialScope("byok", apiKey)
+
 	switch settings.Provider {
 	case tenant.LLMProviderClaude:
 		model := settings.ModelOverride
 		if model == "" {
 			model = defaultClaudeModel
 		}
-		return NewClaudeProvider(ClaudeConfig{
+		p, err := NewClaudeProvider(ClaudeConfig{
 			APIKey:     apiKey,
 			Model:      model,
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
+		return f.rateLimited(p, err, scope)
 
 	case tenant.LLMProviderOpenAI:
 		model := settings.ModelOverride
 		if model == "" {
 			model = defaultOpenAIModel
 		}
-		return NewOpenAIProvider(OpenAIConfig{
+		p, err := NewOpenAIProvider(OpenAIConfig{
 			APIKey:     apiKey,
 			Model:      model,
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
+		return f.rateLimited(p, err, scope)
 
 	case tenant.LLMProviderGemini:
 		model := settings.ModelOverride
 		if model == "" {
 			model = defaultGeminiModel
 		}
-		return NewGeminiProvider(GeminiConfig{
+		p, err := NewGeminiProvider(GeminiConfig{
 			APIKey:     apiKey,
 			Model:      model,
 			Timeout:    time.Duration(f.platformConfig.TimeoutSeconds) * time.Second,
 			MaxRetries: 3,
 		})
+		return f.rateLimited(p, err, scope)
 
 	case tenant.LLMProviderAzureOpenAI:
 		// Azure OpenAI support planned for Phase 2.
