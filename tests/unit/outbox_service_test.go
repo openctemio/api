@@ -2382,8 +2382,33 @@ func TestDefaultEnabledSeverities(t *testing.T) {
 
 func TestDefaultEnabledEventTypes(t *testing.T) {
 	defaults := integration.DefaultEnabledEventTypes()
-	if len(defaults) != 3 {
-		t.Fatalf("expected 3 default event types, got %d", len(defaults))
+
+	// Asserted by membership rather than by count. The previous version of this
+	// test required exactly 3 entries, which made every legitimate addition look
+	// like a regression while saying nothing about which types were actually
+	// enabled — it would have passed just as happily with the wrong three.
+	mustHave := []integration.EventType{
+		integration.EventTypeSecurityAlert,
+		integration.EventTypeNewFinding,
+		integration.EventTypeNewExposure,
+		integration.EventTypeSLABreach,
+	}
+
+	present := make(map[integration.EventType]int, len(defaults))
+	for _, et := range defaults {
+		present[et]++
+	}
+
+	for _, et := range mustHave {
+		if present[et] == 0 {
+			t.Errorf("event type %q is missing from DefaultEnabledEventTypes()", et)
+		}
+	}
+	for et, n := range present {
+		if n > 1 {
+			t.Errorf("event type %q appears %d times in DefaultEnabledEventTypes(); "+
+				"duplicates are harmless at match time but indicate a bad merge", et, n)
+		}
 	}
 }
 
