@@ -2383,15 +2383,22 @@ func TestDefaultEnabledSeverities(t *testing.T) {
 func TestDefaultEnabledEventTypes(t *testing.T) {
 	defaults := integration.DefaultEnabledEventTypes()
 
-	// Asserted by membership rather than by count. The previous version of this
-	// test required exactly 3 entries, which made every legitimate addition look
-	// like a regression while saying nothing about which types were actually
+	// Membership, not count. The original asserted len(defaults) != 3, which
+	// broke on every legitimate addition while never checking WHICH types were
 	// enabled — it would have passed just as happily with the wrong three.
-	mustHave := []integration.EventType{
+	//
+	// The want list is the union of two branches that both added defaults
+	// (#396 priority escalation, #399 the six undeliverable types). Keeping it
+	// explicit is what makes a lost entry visible at merge time.
+	want := []integration.EventType{
 		integration.EventTypeSecurityAlert,
 		integration.EventTypeNewFinding,
 		integration.EventTypeNewExposure,
+		integration.EventTypeFindingPriorityEscalated,
 		integration.EventTypeSLABreach,
+		integration.EventTypeFindingAssigned,
+		integration.EventTypeWorkflowNotification,
+		integration.EventTypeApprovalRequested,
 	}
 
 	present := make(map[integration.EventType]int, len(defaults))
@@ -2399,7 +2406,7 @@ func TestDefaultEnabledEventTypes(t *testing.T) {
 		present[et]++
 	}
 
-	for _, et := range mustHave {
+	for _, et := range want {
 		if present[et] == 0 {
 			t.Errorf("event type %q is missing from DefaultEnabledEventTypes()", et)
 		}
@@ -2408,6 +2415,20 @@ func TestDefaultEnabledEventTypes(t *testing.T) {
 		if n > 1 {
 			t.Errorf("event type %q appears %d times in DefaultEnabledEventTypes(); "+
 				"duplicates are harmless at match time but indicate a bad merge", et, n)
+		}
+	}
+
+	// A default that is not in AllEventTypes() is silently dropped at delivery:
+	// it is whitelisted for the tenant but matches no registered type. That is
+	// the exact defect this file's sibling tests exist to prevent, so it must
+	// not be reachable through the defaults either.
+	known := make(map[integration.EventType]bool)
+	for _, info := range integration.AllEventTypes() {
+		known[info.Type] = true
+	}
+	for _, et := range defaults {
+		if !known[et] {
+			t.Errorf("default event type %q is not in AllEventTypes()", et)
 		}
 	}
 }

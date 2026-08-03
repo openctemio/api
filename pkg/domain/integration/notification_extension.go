@@ -109,6 +109,11 @@ const (
 	EventTypeFindingTriaged   EventType = "finding_triaged"
 	EventTypeFindingFixed     EventType = "finding_fixed"
 	EventTypeFindingReopened  EventType = "finding_reopened"
+	// EventTypeFindingPriorityEscalated fires when an already-classified
+	// finding is re-classified UP (e.g. P3 -> P0 because its CVE was newly
+	// listed in KEV, or a compensating control was removed). Without it a
+	// priority escalation is a silent dashboard update.
+	EventTypeFindingPriorityEscalated EventType = "finding_priority_escalated"
 
 	// EventTypeFindingAssigned fires when an assignment rule routes a finding to
 	// a group AND that rule has its "notify group" option switched on. The
@@ -183,6 +188,7 @@ func AllEventTypes() []EventTypeInfo {
 		{Type: EventTypeFindingTriaged, Category: EventCategoryFinding, Label: "Need Triage Finding", Description: "Finding needs triage/review", RequiredModule: ModuleFindings},
 		{Type: EventTypeFindingFixed, Category: EventCategoryFinding, Label: "Fixed Finding", Description: "Finding has been remediated", RequiredModule: ModuleFindings},
 		{Type: EventTypeFindingReopened, Category: EventCategoryFinding, Label: "Reopened Finding", Description: "Finding reopened after fix", RequiredModule: ModuleFindings},
+		{Type: EventTypeFindingPriorityEscalated, Category: EventCategoryFinding, Label: "Priority Escalated", Description: "Finding re-classified to a higher priority (e.g. P3 to P0)", RequiredModule: ModuleFindings},
 		{Type: EventTypeFindingAssigned, Category: EventCategoryFinding, Label: "Finding Assigned", Description: "Finding routed to a group by an assignment rule with group notification enabled", RequiredModule: ModuleFindings},
 		{Type: EventTypeSLABreach, Category: EventCategoryFinding, Label: "SLA Breached", Description: "Finding missed its SLA remediation deadline", RequiredModule: ModuleFindings},
 
@@ -237,6 +243,13 @@ func DefaultEnabledEventTypes() []EventType {
 		// already visible in-app, and broadcasting every one of them to a shared
 		// channel is noise.
 		EventTypeApprovalRequested,
+
+		// A finding the operator already triaged as low-urgency silently
+		// becoming P0 is the escalation they cannot afford to miss, so it is
+		// on by default. Migration 000201 backfills existing rows; the
+		// per-integration severity filter still applies (P0 -> critical,
+		// P1 -> high, ...), so this is not a firehose.
+		EventTypeFindingPriorityEscalated,
 	}
 }
 

@@ -944,6 +944,19 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 	s.Vulnerability.SetOutboxService(deps.DB, s.Outbox)
 	s.Exposure.SetOutboxService(deps.DB, s.Outbox)
 
+	// Priority-change publisher. PriorityClassificationService emits a
+	// PriorityChangeEvent on every class transition and nil-guards the
+	// publisher, so leaving this unwired made the whole path — the event, the
+	// transition detection and the PriorityFloodGuard that protects its
+	// fan-out — inert: a finding escalating to P0 was a silent dashboard
+	// update. Wired here rather than next to the other
+	// PriorityClassification setters because s.Outbox does not exist yet at
+	// that point. The publisher itself filters to escalations only (see its
+	// doc comment) so ingest does not double-notify alongside "new_finding".
+	s.PriorityClassification.SetChangePublisher(
+		app.NewOutboxPriorityChangePublisher(s.Outbox, log),
+	)
+
 	// Note: UserNotificationService is wired later after NotificationService is initialized
 
 	// Note: NotificationService is wired later after WebSocketHub is initialized
@@ -962,6 +975,9 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 	// Multi-key store for rotation overlap (RFC-014 Phase 3). Additive: auth
 	// still accepts the inline key; renewal under a TTL issues overlapping keys.
 	s.Agent.SetAPIKeyRepository(repos.AgentAPIKey)
+	// Operator-tunable load-balancing weights (AGENT_LB_*). Applied to the
+	// load_score recomputed on every heartbeat.
+	s.Agent.SetLoadBalancingWeights(cfg.Worker.LoadBalancing.Weights())
 	s.Command = command.NewService(repos.Command, log)
 
 	// Initialize ingest service (unified ingestion engine)
@@ -1036,6 +1052,9 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 
 	// Initialize agent selector for load balancing
 	s.AgentSelector = app.NewAgentSelector(repos.Agent, repos.Command, deps.AgentStateStore, log)
+	// Same AGENT_LB_* weights drive job placement, so tuning them changes
+	// scheduling and not just the reported score.
+	s.AgentSelector.SetLoadBalancingWeights(cfg.Worker.LoadBalancing.Weights())
 
 	// Initialize security validator for pipeline/scan operations
 	securityValidator := app.NewSecurityValidator(repos.Tool, log)
