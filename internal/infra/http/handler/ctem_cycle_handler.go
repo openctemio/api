@@ -259,7 +259,7 @@ func (h *CTEMCycleHandler) Activate(w http.ResponseWriter, r *http.Request) {
 		  WHERE id = $1 AND tenant_id = $2 AND activated_at IS NULL`,
 		id, tenantID,
 	); aerr != nil {
-		h.logger.Warn("cycle activated_at stamp failed", "cycle_id", id, "error", aerr)
+		h.logger.Warn("cycle activated_at stamp failed", "cycle_id", sanitizeLogField(id), "error", aerr)
 	}
 
 	// Pull the Charter so we can read in_scope_services. The charter is

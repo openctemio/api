@@ -171,16 +171,16 @@ func (h *CTEMCycleHandler) persistMetrics(ctx context.Context, tenantID, cycleID
 	tid, cid, ok := h.parseIDs(tenantID, cycleID)
 	if !ok {
 		h.logger.Warn("ctem cycle metrics: bad ids; skipping compute",
-			"tenant_id", tenantID, "cycle_id", cycleID)
+			"tenant_id", sanitizeLogField(tenantID), "cycle_id", sanitizeLogField(cycleID))
 		return
 	}
 	set, err := h.metrics.Compute(ctx, tid, cid)
 	if err != nil {
-		h.logger.Warn("ctem cycle metrics: compute failed", "cycle_id", cycleID, "error", err)
+		h.logger.Warn("ctem cycle metrics: compute failed", "cycle_id", sanitizeLogField(cycleID), "error", err)
 		return
 	}
 	if err := h.metrics.UpsertBatch(ctx, tid, cid, set); err != nil {
-		h.logger.Warn("ctem cycle metrics: persist failed", "cycle_id", cycleID, "error", err)
+		h.logger.Warn("ctem cycle metrics: persist failed", "cycle_id", sanitizeLogField(cycleID), "error", err)
 	}
 }
 
