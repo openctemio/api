@@ -723,6 +723,12 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 			newThreatModelOracle(repos.ThreatModel, defaultThreatScoreThreshold, 5*time.Minute))
 	}
 
+	// AI-triage de-escalation: feed a high-confidence "likely false positive"
+	// verdict into prioritization so it can LOWER a finding by one bounded level
+	// (the only signal that reduces priority). Batch-first, tenant-scoped, nil-safe
+	// — no verdict / low confidence → no effect, never an escalation.
+	s.PriorityClassification.SetAITriageVerdictLookup(postgres.NewAITriagePriorityLookupRepo(deps.DB))
+
 	// B1/B2 reclassification pipeline wiring:
 	//   producers → ControlChangePublisher → MemoryQueue
 	//   PriorityReclassifyController (workers.go) → Reclassifier → ClassifyFinding
@@ -892,6 +898,12 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 		)
 		s.AITriage.SetAuditService(s.Audit)
 		s.Vulnerability.SetAITriageService(s.AITriage) // Wire auto-triage on finding creation
+
+		// On triage completion, enqueue an asset-scoped reclassify so a
+		// high-confidence false-positive verdict de-escalates the finding's
+		// priority. Reuses the same MemoryQueue → Reclassifier → ClassifyFinding
+		// pipeline the control/rule producers use (wired above).
+		s.AITriage.SetReclassifyEnqueuer(aiTriageReclassifyEnqueuer{pub: s.ControlChangePub})
 
 		// RFC-008: per-tenant LLM token budget. Always constructed so
 		// Status() works for dashboards even before enforcement.
@@ -1159,7 +1171,7 @@ func NewServices(deps *ServiceDeps) (*Services, error) {
 		pipeline.WithAgentSelector(pipelineAgentSelectorAdapter),
 		pipeline.WithToolRepo(repos.Tool),
 		pipeline.WithQualityGate(repos.ScanProfile, repos.Finding),
-		pipeline.WithScanDeactivator(s.Scan), // Cascade pause scans when pipeline is deactivated
+		pipeline.WithScanDeactivator(s.Scan),     // Cascade pause scans when pipeline is deactivated
 		pipeline.WithScanRunRecorder(repos.Scan), // Record run outcome back onto the scan (last_run_status/counters)
 	)
 
