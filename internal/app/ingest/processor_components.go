@@ -311,10 +311,10 @@ func (p *ComponentProcessor) resolveDepAssetIDs(report *ctis.Report, assetMap ma
 		out[i] = fallback
 		if fallback.IsZero() {
 			p.logger.Warn("SBOM dependency could not be attributed to any asset; skipping",
-				"name", dep.Name, "version", dep.Version)
+				"name", sanitizeIngestLogField(dep.Name), "version", sanitizeIngestLogField(dep.Version))
 		} else {
 			p.logger.Debug("SBOM dependency not attributable to a specific asset; using fallback",
-				"name", dep.Name, "version", dep.Version, "asset_id", fallback.String())
+				"name", sanitizeIngestLogField(dep.Name), "version", sanitizeIngestLogField(dep.Version), "asset_id", fallback.String())
 		}
 	}
 	return out
