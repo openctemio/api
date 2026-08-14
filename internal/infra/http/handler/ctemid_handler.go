@@ -65,8 +65,8 @@ func (h *CTEMIDHandler) List(w http.ResponseWriter, r *http.Request) {
 	if c := q.Get("category"); c != "" {
 		category = &c
 	}
-	limit := parseIntDefault(q.Get("limit"), 100)
-	offset := parseIntDefault(q.Get("offset"), 0)
+	limit := parseQueryIntBounded(q.Get("limit"), 100, 1, MaxPerPage)
+	offset := parseQueryIntBounded(q.Get("offset"), 0, 0, 1_000_000)
 
 	entries, total, err := h.service.List(r.Context(), category, limit, offset)
 	if err != nil {
