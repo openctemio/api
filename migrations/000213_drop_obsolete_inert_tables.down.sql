@@ -1,10 +1,13 @@
--- Down for 000213: recreate the 5 dropped tables (STRUCTURE ONLY).
+-- Down for 000213: recreate the 7 dropped tables (STRUCTURE ONLY).
 --
--- No data is restored and none is lost: all 5 tables were 0-row when dropped.
+-- No data is restored and none is lost: all 7 tables were 0-row when dropped.
 -- Each table is recreated exactly as its creating migration defined it, and for the
--- four tables whose id DEFAULT was later switched to uuid_generate_v7() by
--- 000062_uuid_v7, that ALTER is reapplied here so the restored shape matches the
--- live pre-drop schema exactly (threat_actor_cves was never touched by 000062).
+-- tables whose id DEFAULT was later switched to uuid_generate_v7() by
+-- 000062_uuid_v7 (agent_metrics, email_logs, registration_tokens,
+-- scan_profile_template_sources, agent_audit_logs), that ALTER is reapplied here so
+-- the restored shape matches the live pre-drop schema exactly. threat_actor_cves and
+-- finding_regression_events were never touched by 000062 and keep their original
+-- id defaults.
 
 -- 1. agent_metrics — original DDL from 000016_agents.up.sql.
 CREATE TABLE IF NOT EXISTS agent_metrics (
@@ -111,3 +114,42 @@ CREATE TABLE IF NOT EXISTS threat_actor_cves (
 CREATE INDEX IF NOT EXISTS idx_threat_actor_cves_tenant ON threat_actor_cves(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_threat_actor_cves_actor ON threat_actor_cves(threat_actor_id);
 CREATE INDEX IF NOT EXISTS idx_threat_actor_cves_cve ON threat_actor_cves(cve_id);
+
+-- 6. finding_regression_events — original DDL from 000152_business_services_and_regression.up.sql.
+--    (id keeps gen_random_uuid(); 000062 never touched this table.)
+CREATE TABLE IF NOT EXISTS finding_regression_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    finding_id UUID NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    previous_resolution VARCHAR(50),
+    reopened_by UUID,
+    reason TEXT,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_regression_events_tenant ON finding_regression_events(tenant_id, detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_regression_events_finding ON finding_regression_events(finding_id);
+
+-- 7. agent_audit_logs — original DDL from 000021_audit_logs.up.sql.
+CREATE TABLE IF NOT EXISTS agent_audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL,
+    agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+    api_key_id UUID REFERENCES agent_api_keys(id) ON DELETE SET NULL,
+    event_type VARCHAR(50) NOT NULL,
+    event_action VARCHAR(100) NOT NULL,
+    event_status VARCHAR(20) NOT NULL,
+    ip_address INET,
+    user_agent VARCHAR(500),
+    request_id VARCHAR(100),
+    details JSONB DEFAULT '{}',
+    error_message TEXT,
+    duration_ms INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT chk_agent_audit_logs_status CHECK (event_status IN ('success', 'failure', 'denied'))
+);
+COMMENT ON TABLE agent_audit_logs IS 'Audit log for agent activities';
+CREATE INDEX IF NOT EXISTS idx_agent_audit_logs_tenant ON agent_audit_logs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_audit_logs_agent ON agent_audit_logs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_audit_logs_type ON agent_audit_logs(event_type, created_at DESC);
+ALTER TABLE agent_audit_logs ALTER COLUMN id SET DEFAULT uuid_generate_v7();  -- from 000062
