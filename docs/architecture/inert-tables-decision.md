@@ -5,8 +5,9 @@ schema but have **no writer** (nothing ever `INSERT`s into them) and no reader.
 The initial reading held two of them (`agent_audit_logs`,
 `finding_regression_events`) as latent "wire" candidates, but a careful
 re-analysis showed both are dead too — the intent they seemed to carry is
-actually served elsewhere (see the per-table reasons below). **All seven have
-been dropped** in `000213_drop_obsolete_inert_tables`.
+actually served elsewhere (see the per-table reasons below). **All seven are
+retired via a two-phase, non-destructive process** starting in
+`000213_quarantine_obsolete_inert_tables`.
 
 Verification for every row below: `grep -rw "<table>" --include='*.go'` (minus
 `/migrations/`) = 0 Go refs, `grep -rw "<table>"` across the `agent`, `sdk-go`,
@@ -14,12 +15,24 @@ and `ui` repos and across api's non-Go files (yaml/yml/sql/json/toml, seed
 included) = 0, a live `pg_constraint` check = 0 inbound foreign keys, and live
 `pg_trigger` / `pg_proc` / `pg_views` scans = 0 DB-internal writers.
 
-## DROPPED in `000213`
+## Two-phase retirement (risk-controlled)
 
-Removed by `000213_drop_obsolete_inert_tables.up.sql` (fail-loud plain
-`DROP TABLE IF EXISTS`, no `CASCADE`). The paired `..._down.sql` recreates each
-table's original empty structure, so the change is fully reversible with no data
-loss (every table was 0-row).
+**Phase 1 — quarantine (this migration, `000213_quarantine_obsolete_inert_tables`).**
+Each table is moved out of `public` into a dedicated `deprecated` schema
+(`ALTER TABLE ... SET SCHEMA deprecated`). This removes them from the application
+schema (public base-table count 180 → 173) while preserving *everything* — rows,
+indexes, constraints, RLS shadow policies, and in/out foreign keys all travel
+with the table. It is exactly reversible (the `down` moves them back to `public`)
+with zero data loss, and if any unfound consumer exists it fails loud and recovery
+is a one-line move-back. This is deliberately NOT a `DROP`.
+
+**Phase 2 — drop (a LATER migration, after a release confirms nothing broke).**
+Once a production release has run with the tables quarantined and nothing has
+errored, a follow-up migration performs the real removal
+(`DROP SCHEMA deprecated CASCADE`). Until then, nothing is destroyed.
+
+Both the direct-DROP dry-run and the SET SCHEMA move were verified error-free on
+the live database (transaction + `ROLLBACK`), and every table was 0-row.
 
 | Table | Created by | Why it was safe to drop |
 |-------|-----------|-------------------------|
