@@ -208,3 +208,84 @@ func TestPriorityClassificationSeams_AreWiredOrExplicitlyOptional(t *testing.T) 
 		}
 	}
 }
+
+// optionalTenantSeams lists TenantService Set* seams deliberately NOT applied
+// to the final services.Tenant in main.go, each with the reason. Empty today.
+var optionalTenantSeams = map[string]string{}
+
+// TestTenantServiceSeams_RewiredAfterRebuild guards the TenantService
+// split-brain. main.go replaces services.Tenant with a second
+// app.NewTenantService (to add the email enqueuer), which silently drops every
+// Set* call initServices made on the first instance. That has shipped the same
+// bug six times: permission services, session service, membership cache, SSO
+// checker, role service, and the data-scope policy store, whose loss made
+// GET /tenants/{id}/settings/data-scope return 500 ("data scope policy is not
+// configured") for every tenant.
+//
+// Every Set* method on TenantService must therefore be invoked on
+// services.Tenant in main.go, after the rebuild, or be listed in
+// optionalTenantSeams with a reason.
+func TestTenantServiceSeams_RewiredAfterRebuild(t *testing.T) {
+	typ := reflect.TypeOf(&app.TenantService{})
+	seams := make([]string, 0, 8)
+	for i := 0; i < typ.NumMethod(); i++ {
+		if name := typ.Method(i).Name; strings.HasPrefix(name, "Set") {
+			seams = append(seams, name)
+		}
+	}
+	if len(seams) == 0 {
+		t.Fatal("reflection found no Set* seams on TenantService; the guard is not guarding anything")
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	// Only count calls that come AFTER the rebuild; a call before it is
+	// applied to the instance that is about to be thrown away.
+	rebuildPos := token.NoPos
+	ast.Inspect(file, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		var lhs, rhs bytes.Buffer
+		_ = printer.Fprint(&lhs, fset, as.Lhs[0])
+		_ = printer.Fprint(&rhs, fset, as.Rhs[0])
+		if lhs.String() == "services.Tenant" && strings.HasPrefix(rhs.String(), "app.NewTenantService(") {
+			rebuildPos = as.Pos()
+		}
+		return true
+	})
+	if rebuildPos == token.NoPos {
+		// No rebuild any more: the split-brain this test guards is gone and
+		// initServices' wiring is the wiring. Nothing to check.
+		t.Skip("main.go no longer rebuilds services.Tenant")
+	}
+
+	wired := make(map[string]bool)
+	ast.Inspect(file, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || sel.Pos() < rebuildPos {
+			return true
+		}
+		var buf bytes.Buffer
+		if err := printer.Fprint(&buf, fset, sel.X); err == nil && buf.String() == "services.Tenant" {
+			wired[sel.Sel.Name] = true
+		}
+		return true
+	})
+
+	for _, seam := range seams {
+		if reason, ok := optionalTenantSeams[seam]; ok {
+			t.Logf("%s intentionally not re-wired: %s", seam, reason)
+			continue
+		}
+		if !wired[seam] {
+			t.Errorf("TenantService.%s is not called on services.Tenant after main.go rebuilds it.\n"+
+				"The rebuild discards every setter initServices applied, and the service nil-guards the collaborator,\n"+
+				"so the feature silently stops working. Re-wire it in main.go after the rebuild.", seam)
+		}
+	}
+}

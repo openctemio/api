@@ -282,6 +282,10 @@ func run() int {
 	// the suspend/reactivate notifier resolve the recipient (it was never wired,
 	// so those emails were skipped).
 	services.Tenant.SetUserService(services.User)
+	// Re-wire the data-scope policy store. initServices set it on the instance
+	// the rebuild above discarded, so GET/PUT /tenants/{id}/settings/data-scope
+	// answered 500 "data scope policy is not configured" for every tenant.
+	services.Tenant.SetDataScopePolicyStore(repos.Tenant)
 	// Administrator-created accounts. The set-password link is emailed
 	// when SMTP is configured, otherwise returned once to the administrator.
 	var setupMailer app.AccountSetupMailer
