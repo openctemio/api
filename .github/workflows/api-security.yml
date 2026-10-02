@@ -20,7 +20,7 @@ on:
       - '.github/**'
       - 'deploy/**'
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, ci-test-base]
     paths:
       - 'api/**'
       - 'Makefile'

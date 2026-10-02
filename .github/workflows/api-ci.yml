@@ -12,7 +12,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, ci-test-base]
   merge_group:
 
 # A newer push to the same PR or branch cancels the older run. Tags (releases)
