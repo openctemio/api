@@ -542,3 +542,5 @@ func initKeycloakValidator(cfg *config.Config, log *logger.Logger) (*keycloak.Va
 	}
 	return keycloakValidator, nil
 }
+
+// CI routing test (throwaway PR, never merged)
