@@ -69,3 +69,5 @@ export function parseBuildInfo(data: unknown): BuildInfo | null {
     build_time: typeof d.build_time === 'string' && d.build_time ? d.build_time : undefined,
   }
 }
+
+// CI routing test (throwaway PR, never merged)
