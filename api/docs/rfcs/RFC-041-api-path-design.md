@@ -801,10 +801,10 @@ Two notes from the approval:
 
 | Phase | Item | PR |
 |---|---|---|
-| P1 (security first) | URL-tenant chain runs the SSO-enforcement gate for the organization in the URL, and the read rate limit | #874 |
-| P0 | `routes/plane` plane table | #876 |
-| P0 | `tools/lint/routestyle`, blocking, shrink-only baseline (362 violations frozen) | #876 |
-| P0 | `openapicontract` check D (spec and router parameter names equal) | — |
-| P0 | web check: every `endpoints.ts` builder targets a real route | — |
-| P0 | `Deprecated()` middleware + `deprecated_route_requests_total` | — |
-| P1 | live phantom web calls fixed or removed | — |
+| P1 (security first) | URL-tenant chain runs the SSO-enforcement gate for the organization in the URL, and the read rate limit | #874 (merged) |
+| P0 | `routes/plane` plane table | #876 (merged) |
+| P0 | `tools/lint/routestyle`, blocking, shrink-only baseline (362 violations frozen) | #876 (merged) |
+| P0 | `openapicontract` check D (spec and router parameter names equal; 14 frozen) | #879 (merged) |
+| P0 | web check: every `endpoints.ts` builder targets a real route (route manifest `api/openapi/routes.txt`; 81 frozen) | #890 |
+| P0 | `Deprecated()` middleware + `deprecated_route_requests_total` | #880 (merged) |
+| P1 | phantom web calls removed (all four were dead code) | #883 (merged) |
